@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+venv
+
+# IDEs
+.vscode/
+
+# Project data files
+*.npy
+*.dcm
+dicom_input/
+processed_data/
+visualizations/
+*.png
+*.jpg
+*.jpeg
+
+# Reports
+processing_report.csv
+*.log

@@ -1,0 +1,11 @@
+patient_name,patient_id,ear,cholesteatoma,ossicular_discontinuity,facial_dehiscence,surgery_type,exclusion_status,comments
+Angel francis,pt_01,R,1,0,0,primary,include,
+Angel francis,pt_01,L,,,,none,exclude,mild chl
+Chandan Jaiswal,pt_02,R,,,,none,exclude,pathological
+Chandan Jaiswal,pt_02,L,1,1,0,primary,include,
+manjudevi,pt_03,R,,,,none,exclude,other ear pathology
+manjudevi,pt_03,L,0,0,0,primary,include,
+vatsalya dubey,pt_04,R,1,1,0,primary,include,
+vatsalya dubey,pt_04,L,0,0,0,none,include,
+Darshana das,pt_05,R,0,0,0,none,include,
+Darshana das,pt_05,L,1,0,0,primary,include,
