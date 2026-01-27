@@ -6,7 +6,6 @@ Detailed statistics and summary of processed data
 import json
 import pandas as pd
 from pathlib import Path
-import numpy as np
 
 
 def generate_report(data_dir='processed_data', labels_file='labels.csv', output_file='processing_report.csv'):

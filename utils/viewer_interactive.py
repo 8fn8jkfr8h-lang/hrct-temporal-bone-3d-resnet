@@ -21,7 +21,6 @@ Controls:
 
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import json
 from pathlib import Path
 import sys
@@ -47,8 +46,8 @@ class InteractiveViewer:
         self.image_handle = None
         self.title_handle = None
         
-        self.load_current_data()
         self.setup_figure()
+        self.load_current_data()
         
     def load_current_data(self):
         """Load data for current patient and side"""
@@ -102,6 +101,10 @@ class InteractiveViewer:
         
     def update_display(self):
         """Update the display (optimized for speed)"""
+        # Ensure image and title handles are initialized
+        if self.image_handle is None or self.title_handle is None:
+            return
+
         volume = self.get_current_volume()
         
         # Ensure slice index is valid

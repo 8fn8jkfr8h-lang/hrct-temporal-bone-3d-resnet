@@ -19,5 +19,6 @@ visualizations/
 *.jpeg
 
 # Reports
+labels.csv
 processing_report.csv
 *.log

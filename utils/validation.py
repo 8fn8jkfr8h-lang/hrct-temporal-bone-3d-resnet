@@ -6,10 +6,10 @@ Comprehensive quality checks on processed volumes
 import numpy as np
 import json
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Any
 
 
-def validate_volume(volume_path: Path, volume_type: str) -> Dict:
+def validate_volume(volume_path: Path, volume_type: str) -> Dict[str, Any]:
     """Validate a single volume file"""
     
     results = {
@@ -69,7 +69,7 @@ def validate_volume(volume_path: Path, volume_type: str) -> Dict:
     return results
 
 
-def validate_metadata(metadata_path: Path) -> Dict:
+def validate_metadata(metadata_path: Path) -> Dict[str, Any]:
     """Validate metadata file"""
     
     results = {
@@ -115,7 +115,7 @@ def validate_metadata(metadata_path: Path) -> Dict:
     return results
 
 
-def validate_patient(patient_dir: Path) -> Dict:
+def validate_patient(patient_dir: Path) -> Dict[str, Any]:
     """Validate all data for one patient"""
     
     patient_id = patient_dir.name
@@ -133,7 +133,7 @@ def validate_patient(patient_dir: Path) -> Dict:
             results['ears'][side] = {'error': 'Directory does not exist'}
             continue
         
-        ear_results = {
+        ear_results: Dict[str, Any] = {
             'axial': validate_volume(side_dir / 'axial_volume.npy', 'axial'),
             'coronal': validate_volume(side_dir / 'coronal_volume.npy', 'coronal'),
             'metadata': validate_metadata(side_dir / 'metadata.json')
@@ -155,7 +155,7 @@ def validate_patient(patient_dir: Path) -> Dict:
 
 
 
-def run_validation(data_dir='processed_data') -> List[Dict]:
+def run_validation(data_dir='processed_data') -> List[Dict[str, Any]]:
     """
     Run validation on all processed data
     

@@ -35,7 +35,7 @@ def main():
     processor = DICOMProcessor(INPUT_DIR, OUTPUT_DIR, LABELS_FILE)
     
     # Process all patients
-    results = processor.process_all_patients()
+    processor.process_all_patients()
     
     print(f"\n{'='*60}")
     print("Phase 1 complete!")
