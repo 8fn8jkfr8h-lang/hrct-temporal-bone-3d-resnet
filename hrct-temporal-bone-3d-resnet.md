@@ -104,7 +104,7 @@ pt_02/
 
 ## **PROJECT ARCHITECTURE**
 
-### **Phase 1: Data Infrastructure**
+### **Phase 1: Data Infrastructure & Lateral Splitting**
 
 **DICOM Processing:**
 - Load DICOM series with proper slice ordering (sort by ImagePositionPatient[2])
@@ -116,17 +116,41 @@ pt_02/
 **Coronal Reconstruction:**
 - Use SimpleITK resampling for multiplanar reformats
 - Maintain isotropic spacing (0.335mm based on acquisition)
-- Generate coronal views through temporal bones
+- Generate coronal views from FULL volume first
 - Output both axial and coronal volumes
+
+**Lateral Split (Left/Right Separation):**
+- Performed on BOTH axial and coronal volumes after reconstruction
+- Sagittal plane splitting at midline (x = width/2)
+- 20px margin overlap at midline to prevent edge artifacts
+- DICOM convention: Right side of image = Left side of patient
+- Each ear processed and saved independently from this point onwards
+
+**Why split in Phase 1:**
+- Ensures consistent separation across all subsequent processing steps
+- Reduces memory footprint for Phase 2+ operations (half-volume processing)
+- Aligns with clinical workflow (each ear is independent diagnostic unit)
+- Simplifies ROI extraction in Phase 2 (no lateral disambiguation needed)
 
 **Output Structure:**
 ```
 processed_data/
 ├─ pt_01/
-│  ├─ axial_volume.npy          # (N, 768, 768) where N varies
-│  ├─ coronal_volume.npy        # Reconstructed
-│  └─ metadata.json             # spacing, orientation, patient info
+│  ├─ left/
+│  │  ├─ axial_volume.npy       # (~N, 768, ~404) - half width + margin
+│  │  ├─ coronal_volume.npy     # Reconstructed, half width
+│  │  └─ metadata.json          # spacing, side='L', dimensions
+│  │
+│  └─ right/
+│     ├─ axial_volume.npy       # (~N, 768, ~404) - half width + margin
+│     ├─ coronal_volume.npy     # Reconstructed, half width
+│     └─ metadata.json          # spacing, side='R', dimensions
+│
 ├─ pt_02/
+│  ├─ left/
+│  │  └─ ... (same structure)
+│  └─ right/
+│     └─ ... (same structure)
 ...
 ```
 
@@ -134,44 +158,23 @@ processed_data/
 
 ### **Phase 2: ROI Extraction Pipeline**
 
-**Selected Approach: Split-Then-Extract (Process Each Ear Independently)**
+**Selected Approach: Per-Ear Processing (Lateral Split Already Complete)**
 
-This approach splits left and right temporal bones first, then processes each side independently. This is superior because each ear can have different optimal slice ranges.
+Since Phase 1 has already separated left and right temporal bones, Phase 2 processes each ear volume independently. This is superior because each ear can have different optimal slice ranges.
 
-#### **Stage 1: Lateral Split (Left/Right Separation)**
-```
-Objective: Separate left and right temporal bone regions
+> **Note:** Lateral splitting is now performed in Phase 1 during DICOM ingestion. Each patient directory contains `left/` and `right/` subdirectories with pre-separated volumes.
 
-Method: Sagittal plane splitting
-├─ Load full CT volume (N, 768, 768)
-├─ Identify midline (sagittal center plane)
-│   └─ Use intensity-based detection or anatomical landmarks (nasal septum)
-├─ Split into two volumes:
-│   ├─ Left volume: pixels with x < midline_x (plus 20px margin)
-│   └─ Right volume: pixels with x > midline_x (plus 20px margin)
-├─ Crop to generous bounding boxes around each temporal bone
-│   ├─ Left: x=0 to midline+20px, y=full, z=full
-│   └─ Right: x=midline-20px to max, y=full, z=full
-└─ Result: Two independent hemicranial volumes
-
-Output per patient:
-├─ left_volume.npy: (N, ~400, 768) - left half of head
-└─ right_volume.npy: (N, ~400, 768) - right half of head
-```
-
-**Why generous bounding box with overlap:**
-- Ensures no cropping of temporal bone structures
-- 20px overlap at midline prevents edge artifacts
-- Disk space is not a constraint
-
-#### **Stage 2: Independent Temporal Bone Localization (Per Side)**
+#### **Stage 1: Temporal Bone Localization (Per Side)**
 ```
 For EACH side (left and right) independently:
+Input: Pre-split hemicranial volume from Phase 1
+       ├─ left/axial_volume.npy or right/axial_volume.npy
+       └─ Already normalized [0,1], bone-windowed
 
 Objective: Locate temporal bone within hemicranial volume
 
 Method: Coarse localization
-├─ Detect bone regions (HU > 300)
+├─ Detect bone regions (HU > 300 equivalent in normalized scale)
 ├─ Identify petrous temporal bone (densest lateral structure)
 ├─ Find approximate center of temporal bone mass
 ├─ Extract sub-volume with generous 3D bounding box
@@ -182,7 +185,7 @@ Output per side:
 └─ temporal_bone_volume.npy: (~100, 150, 150)
 ```
 
-#### **Stage 3: Anatomical Landmark Detection (Per Side)**
+#### **Stage 2: Anatomical Landmark Detection (Per Side)**
 ```
 For EACH temporal bone volume independently:
 
@@ -212,7 +215,7 @@ This runs completely independently for left vs right:
 - GPU availability allows sophisticated methods
 - Independent processing = simpler debugging
 
-#### **Stage 4: Optimal Slice Range Selection (Per Side)**
+#### **Stage 3: Optimal Slice Range Selection (Per Side)**
 ```
 For EACH side independently:
 
@@ -237,7 +240,7 @@ Output per side:
 └─ Variable-length slice stack (30-40 slices, differs per ear)
 ```
 
-#### **Stage 5: Middle Ear ROI Cropping (Per Side)**
+#### **Stage 4: Middle Ear ROI Cropping (Per Side)**
 ```
 For EACH slice stack independently:
 
@@ -253,25 +256,28 @@ Output per side:
 └─ roi_axial.npy: (30-40, 224, 224) - variable length
 ```
 
-#### **Stage 6: Coronal Reconstruction (Per Side)**
+#### **Stage 5: Coronal ROI Extraction (Per Side)**
 ```
 For EACH temporal bone volume independently:
+Input: Coronal volume already reconstructed in Phase 1 (left/coronal_volume.npy)
 
-Objective: Create coronal views for facial nerve assessment
+Objective: Extract coronal ROI for facial nerve assessment
 
-Method: Multiplanar reformation
-├─ Use SimpleITK to reconstruct coronal plane
-├─ Align perpendicular to lateral semicircular canal
-├─ Resample to isotropic spacing (0.335mm)
-├─ Extract 20-30 coronal slices through temporal bone
+Method: Landmark-guided extraction (using landmarks from Stage 2)
+├─ Use middle ear centroid from landmark detection
+├─ Apply same slice range logic as axial (Stage 3)
+├─ Extract 20-30 coronal slices through temporal bone region
 ├─ Crop to 224×224 around middle ear centroid
-└─ Result: Coronal ROI stack
+└─ Result: Coronal ROI stack matching axial ROI
+
+Note: Coronal reconstruction was already performed in Phase 1.
+      This stage extracts the ROI from the pre-existing coronal volume.
 
 Output per side:
 └─ roi_coronal.npy: (20-30, 224, 224) - variable length
 ```
 
-#### **Stage 7: Laterality Standardization (Per Side)**
+#### **Stage 6: Laterality Standardization (Per Side)**
 ```
 For EACH side independently:
 
@@ -289,23 +295,32 @@ Output per case:
 └─ metadata.json: {"original_side": "L" or "R"}
 ```
 
-**Complete Data Structure:**
+**Complete Data Structure (After Phase 1 + Phase 2):**
 ```
 processed_data/
 ├─ pt_01/
 │  ├─ left/
-│  │  ├─ temporal_bone_volume.npy    # (100, 150, 150)
-│  │  ├─ roi_axial.npy               # (35, 224, 224) - variable
-│  │  ├─ roi_coronal.npy             # (25, 224, 224) - variable
-│  │  ├─ landmarks.json              # IAC, HSC, cochlea coords
-│  │  └─ metadata.json               # spacing, slice range, side
+│  │  │  # --- Phase 1 Outputs (DICOM Ingestion & Split) ---
+│  │  ├─ axial_volume.npy        # (~N, 768, ~404) - half-head axial volume
+│  │  ├─ coronal_volume.npy      # Isotropic coronal reconstruction, half-head
+│  │  ├─ metadata.json           # spacing, side='L', dimensions
+│  │  │
+│  │  │  # --- Phase 2 Outputs (ROI Extraction) ---
+│  │  ├─ temporal_bone_volume.npy  # (100, 150, 150) - coarse localization
+│  │  ├─ roi_axial.npy             # (35, 224, 224) - variable slice count
+│  │  ├─ roi_coronal.npy           # (25, 224, 224) - variable slice count
+│  │  └─ landmarks.json            # IAC, HSC, cochlea coordinates
 │  │
 │  └─ right/
-│     ├─ temporal_bone_volume.npy    # (100, 150, 150)
-│     ├─ roi_axial.npy               # (38, 224, 224) - DIFFERENT
-│     ├─ roi_coronal.npy             # (27, 224, 224) - DIFFERENT
-│     ├─ landmarks.json
-│     └─ metadata.json
+│     │  # --- Phase 1 Outputs ---
+│     ├─ axial_volume.npy
+│     ├─ coronal_volume.npy
+│     ├─ metadata.json
+│     │  # --- Phase 2 Outputs ---
+│     ├─ temporal_bone_volume.npy
+│     ├─ roi_axial.npy             # (38, 224, 224) - DIFFERENT from left
+│     ├─ roi_coronal.npy           # (27, 224, 224) - DIFFERENT from left
+│     └─ landmarks.json
 │
 ├─ pt_02/
 │  ├─ left/

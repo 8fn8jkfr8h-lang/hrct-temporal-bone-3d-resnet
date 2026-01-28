@@ -30,7 +30,8 @@ def validate_volume(volume_path: Path, volume_type: str) -> Dict[str, Any]:
         return results
     
     try:
-        volume = np.load(volume_path)
+        # Use memory-mapped loading to avoid large in-memory allocations
+        volume = np.load(volume_path, mmap_mode='r')
         
         results['shape'] = volume.shape
         results['dtype'] = str(volume.dtype)

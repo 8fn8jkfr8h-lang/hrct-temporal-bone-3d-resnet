@@ -13,7 +13,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import json
 from pathlib import Path
-import sys
 
 
 def create_patient_overview(patient_dir: Path, output_dir: Path):
@@ -42,9 +41,13 @@ def create_patient_overview(patient_dir: Path, output_dir: Path):
         axial = np.load(side_dir / 'axial_volume.npy')
         coronal = np.load(side_dir / 'coronal_volume.npy')
         
-        # Flip coronal view vertically (axis 1) so Head is Up
-        # Data is (Y, Z, X), we flip Z
-        coronal = np.flip(coronal, axis=1)
+        # Flip coronal view for proper radiological display:
+        # 1. Flip vertically (axis 1) so Head is Up
+        # 2. Flip horizontally (axis 2) so patient's left appears on viewer's right
+        #    (standard radiological coronal viewing convention - viewing from front)
+        # Data is (Y, Z, X), we flip Z and X
+        coronal = np.flip(coronal, axis=1)  # Vertical flip for head up
+        coronal = np.flip(coronal, axis=2)  # Horizontal flip for L/R convention
         
         with open(side_dir / 'metadata.json', 'r') as f:
             metadata = json.load(f)
@@ -79,7 +82,7 @@ def create_patient_overview(patient_dir: Path, output_dir: Path):
     print(f"  Saved: {output_file.name}")
 
 
-def main():
+def run_batch_viewer():
     """Main function"""
     
     data_dir = Path('processed_data')
@@ -104,4 +107,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    run_batch_viewer()

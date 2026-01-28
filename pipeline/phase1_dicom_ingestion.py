@@ -17,6 +17,9 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
 
 from utils.dicom_processor import DICOMProcessor
+from utils.generate_report import generate_report
+from utils.validation import run_validation
+from utils.viewer_batch import run_batch_viewer
 
 
 def main():
@@ -41,6 +44,17 @@ def main():
     print("Phase 1 complete!")
     print(f"{'='*60}\n")
 
+    # Automatically generate processing report
+    print("Generating processing report (utils.generate_report)...")
+    generate_report(data_dir=OUTPUT_DIR, labels_file=LABELS_FILE)
+
+    # Automatically run validation
+    print("Running data validation (utils.validation)...")
+    run_validation(data_dir=OUTPUT_DIR)
+
+    # Automatically run batch viewer
+    print("Running batch viewer (utils.viewer_batch)...")
+    run_batch_viewer()
 
 if __name__ == '__main__':
     main()

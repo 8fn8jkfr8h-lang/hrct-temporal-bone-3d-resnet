@@ -46,8 +46,8 @@ class InteractiveViewer:
         self.image_handle = None
         self.title_handle = None
         
-        self.setup_figure()
         self.load_current_data()
+        self.setup_figure()
         
     def load_current_data(self):
         """Load data for current patient and side"""
@@ -58,9 +58,13 @@ class InteractiveViewer:
         self.axial = np.load(side_dir / 'axial_volume.npy')
         self.coronal = np.load(side_dir / 'coronal_volume.npy')
         
-        # Flip coronal view vertically (axis 1) so Head is Up
-        # Data is (Y, Z, X), we flip Z
-        self.coronal = np.flip(self.coronal, axis=1)
+        # Flip coronal view for proper radiological display:
+        # 1. Flip vertically (axis 1) so Head is Up
+        # 2. Flip horizontally (axis 2) so patient's left appears on viewer's right
+        #    (standard radiological coronal viewing convention - viewing from front)
+        # Data is (Y, Z, X), we flip Z and X
+        self.coronal = np.flip(self.coronal, axis=1)  # Vertical flip for head up
+        self.coronal = np.flip(self.coronal, axis=2)  # Horizontal flip for L/R convention
         
         # Load metadata
         with open(side_dir / 'metadata.json', 'r') as f:
@@ -112,6 +116,16 @@ class InteractiveViewer:
         
         # Update image data (faster than clearing and redrawing)
         self.image_handle.set_data(volume[self.slice_idx])
+        
+        # Adjust aspect ratio based on view and metadata
+        if self.view == 'coronal':
+            # For coronal: pixel_spacing is in-plane (horizontal), slice_thickness is vertical
+            pixel_spacing = self.metadata['pixel_spacing'] if isinstance(self.metadata['pixel_spacing'], (int, float)) else self.metadata['pixel_spacing'][0]
+            aspect = pixel_spacing / self.metadata['slice_thickness']
+        else:
+            # For axial: square pixels
+            aspect = 'equal'
+        self.ax.set_aspect(aspect)
         
         # Update title
         patient_id = self.patients[self.patient_idx].name
