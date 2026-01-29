@@ -10,9 +10,23 @@ import pydicom
 import SimpleITK as sitk
 from pathlib import Path
 from typing import Dict, Tuple
+import concurrent.futures
+import os
 import warnings
 warnings.filterwarnings('ignore')
 
+# Try to import cupy for GPU acceleration
+try:
+    import cupy as cp
+    import cupyx.scipy.ndimage as ndimage
+    HAS_GPU = True
+except ImportError:
+    HAS_GPU = False
+
+def _process_wrapper(args):
+    """Helper to unwrap arguments for multiprocessing"""
+    processor, patient_id = args
+    return processor.process_patient(patient_id)
 
 class DICOMProcessor:
     """Process DICOM temporal bone CT scans"""
@@ -24,11 +38,19 @@ class DICOMProcessor:
     # Lateral split parameters
     MIDLINE_MARGIN = 20  # pixels overlap at midline
     
-    def __init__(self, input_dir: str, output_dir: str, labels_file: str):
+    def __init__(self, input_dir: str, output_dir: str, labels_file: str, use_gpu: bool = True):
         self.input_dir = Path(input_dir)
         self.output_dir = Path(output_dir)
         self.labels_file = labels_file
+        self.use_gpu = use_gpu
         
+        if self.use_gpu and not HAS_GPU:
+            print("Warning: GPU acceleration requested but cupy is not installed. Falling back to CPU.")
+            self.use_gpu = False
+        
+        if self.use_gpu:
+            print("✨ GPU acceleration enabled (via cupy)")
+
         # Load labels
         self.labels_df = pd.read_csv(labels_file)
         print(f"Loaded labels for {len(self.labels_df)} ear records")
@@ -147,16 +169,56 @@ class DICOMProcessor:
     
     def reconstruct_coronal_view(self, axial_volume: np.ndarray, metadata: Dict) -> np.ndarray:
         """
-        Reconstruct coronal view from axial slices using SimpleITK
+        Reconstruct coronal view from axial slices.
         Target: isotropic spacing of 0.335mm (as per spec)
         
-        Input: axial_volume shape (slices, height, width)
-        Output: coronal_volume shape (slices, height, width)
-        
-        Note: This reconstructs from the FULL volume. Phase 2 will extract
-        temporal bone ROIs from both axial and coronal views.
+        Input: axial_volume shape (slices (Z), height (Y), width (X))
+        Output: coronal_volume shape (height (Y), slices (Z), width (X))
         """
         print(f"  Reconstructing coronal view...")
+
+        # Target isotropic spacing (0.335mm as per spec)
+        target_spacing = 0.335
+        
+        if self.use_gpu and HAS_GPU:
+            try:
+                print("  🚀 Using GPU acceleration for resampling...")
+                # Move to GPU
+                gpu_vol = cp.asarray(axial_volume)
+                
+                # Calculate zoom factors
+                # Input is (Z, Y, X)
+                z_spacing = metadata['z_spacing']
+                y_spacing = metadata['pixel_spacing'][0]
+                x_spacing = metadata['pixel_spacing'][1]
+                
+                zoom_factors = (
+                    z_spacing / target_spacing,
+                    y_spacing / target_spacing,
+                    x_spacing / target_spacing
+                )
+                
+                print(f"  Resampling with zoom factors: Z={zoom_factors[0]:.2f}, Y={zoom_factors[1]:.2f}, X={zoom_factors[2]:.2f}")
+                
+                # Resample (Linear interpolation equivalent to order=1)
+                resampled_gpu = ndimage.zoom(gpu_vol, zoom_factors, order=1)
+                
+                # Transpose to Coronal view (Y, Z, X)
+                # Input was (Z, Y, X) -> (0, 1, 2)
+                # We want (Y, Z, X) -> (1, 0, 2)
+                coronal_gpu = cp.transpose(resampled_gpu, (1, 0, 2))
+                
+                # Move back to CPU
+                coronal_volume = cp.asnumpy(coronal_gpu)
+                
+                print(f"  Coronal volume shape: {coronal_volume.shape}")
+                return coronal_volume
+                
+            except Exception as e:
+                print(f"  ⚠️ GPU Processing failed: {e}. Falling back to CPU.")
+                # Fall through to CPU implementation
+        
+        # --- CPU Implementation (SimpleITK) ---
         
         # Convert numpy array to SimpleITK image
         sitk_image = sitk.GetImageFromArray(axial_volume)
@@ -173,22 +235,22 @@ class DICOMProcessor:
         
         print(f"  Original spacing: {original_spacing}")
         
-        # Target isotropic spacing (0.335mm as per spec)
-        target_spacing = [0.335, 0.335, 0.335]
+        # Target isotropic spacing
+        target_spacing_list = [target_spacing, target_spacing, target_spacing]
         
         # Calculate new size to maintain physical dimensions
         original_size = sitk_image.GetSize()
         new_size = [
-            int(round(original_size[0] * (original_spacing[0] / target_spacing[0]))),
-            int(round(original_size[1] * (original_spacing[1] / target_spacing[1]))),
-            int(round(original_size[2] * (original_spacing[2] / target_spacing[2])))
+            int(round(original_size[0] * (original_spacing[0] / target_spacing_list[0]))),
+            int(round(original_size[1] * (original_spacing[1] / target_spacing_list[1]))),
+            int(round(original_size[2] * (original_spacing[2] / target_spacing_list[2])))
         ]
         
         print(f"  Resampling from {original_size} to {new_size}")
         
         # Resample to isotropic spacing
         resampler = sitk.ResampleImageFilter()
-        resampler.SetOutputSpacing(target_spacing)
+        resampler.SetOutputSpacing(target_spacing_list)
         resampler.SetSize(new_size)
         resampler.SetOutputDirection(sitk_image.GetDirection())
         resampler.SetOutputOrigin(sitk_image.GetOrigin())
@@ -288,6 +350,19 @@ class DICOMProcessor:
             traceback.print_exc()
             return False
     
+    def is_ear_excluded(self, patient_id: str, side: str) -> bool:
+        """Check if a specific ear should be excluded based on labels.csv"""
+        # Filter for patient and ear
+        mask = (self.labels_df['patient_id'] == patient_id) & (self.labels_df['ear'] == side)
+        ear_labels = self.labels_df[mask]
+        
+        if len(ear_labels) == 0:
+            # If not in labels, we don't exclude it by default
+            return False
+            
+        status = str(ear_labels.iloc[0]['exclusion_status']).strip().lower()
+        return status == 'exclude'
+
     def save_processed_data(
         self,
         patient_id: str,
@@ -297,57 +372,90 @@ class DICOMProcessor:
         left_coronal: np.ndarray,
         right_coronal: np.ndarray
     ):
-        """Save processed volumes and metadata"""
+        """Save processed volumes and metadata, skipping excluded ears"""
         
-        # Create output directories
+        # Create output directory for patient
         patient_output = self.output_dir / patient_id
-        left_dir = patient_output / 'left'
-        right_dir = patient_output / 'right'
+        patient_output.mkdir(parents=True, exist_ok=True)
         
-        left_dir.mkdir(parents=True, exist_ok=True)
-        right_dir.mkdir(parents=True, exist_ok=True)
+        # Check exclusion for each side
+        exclude_left = self.is_ear_excluded(patient_id, 'L')
+        exclude_right = self.is_ear_excluded(patient_id, 'R')
         
         # Save left ear
-        np.save(left_dir / 'axial_volume.npy', left_axial)
-        np.save(left_dir / 'coronal_volume.npy', left_coronal)
-        
-        left_metadata = metadata.copy()
-        left_metadata['side'] = 'L'
-        left_metadata['axial_shape'] = list(left_axial.shape)
-        left_metadata['coronal_shape'] = list(left_coronal.shape)
-        
-        with open(left_dir / 'metadata.json', 'w') as f:
-            json.dump(left_metadata, f, indent=2)
+        if not exclude_left:
+            left_dir = patient_output / 'left'
+            left_dir.mkdir(parents=True, exist_ok=True)
+            np.save(left_dir / 'axial_volume.npy', left_axial)
+            np.save(left_dir / 'coronal_volume.npy', left_coronal)
+            
+            left_metadata = metadata.copy()
+            left_metadata['side'] = 'L'
+            left_metadata['axial_shape'] = list(left_axial.shape)
+            left_metadata['coronal_shape'] = list(left_coronal.shape)
+            
+            with open(left_dir / 'metadata.json', 'w') as f:
+                json.dump(left_metadata, f, indent=2)
+            print(f"    Saved left ear to {left_dir}")
+        else:
+            print(f"    Skipping left ear (exclusion_status='exclude')")
         
         # Save right ear
-        np.save(right_dir / 'axial_volume.npy', right_axial)
-        np.save(right_dir / 'coronal_volume.npy', right_coronal)
-        
-        right_metadata = metadata.copy()
-        right_metadata['side'] = 'R'
-        right_metadata['axial_shape'] = list(right_axial.shape)
-        right_metadata['coronal_shape'] = list(right_coronal.shape)
-        
-        with open(right_dir / 'metadata.json', 'w') as f:
-            json.dump(right_metadata, f, indent=2)
-        
-        print(f"    Saved to {patient_output}")
+        if not exclude_right:
+            right_dir = patient_output / 'right'
+            right_dir.mkdir(parents=True, exist_ok=True)
+            np.save(right_dir / 'axial_volume.npy', right_axial)
+            np.save(right_dir / 'coronal_volume.npy', right_coronal)
+            
+            right_metadata = metadata.copy()
+            right_metadata['side'] = 'R'
+            right_metadata['axial_shape'] = list(right_axial.shape)
+            right_metadata['coronal_shape'] = list(right_coronal.shape)
+            
+            with open(right_dir / 'metadata.json', 'w') as f:
+                json.dump(right_metadata, f, indent=2)
+            print(f"    Saved right ear to {right_dir}")
+        else:
+            print(f"    Skipping right ear (exclusion_status='exclude')")
     
     def process_all_patients(self):
         """Process all patients in the input directory"""
         
         # Get list of patient directories
         patient_dirs = sorted([d for d in self.input_dir.iterdir() if d.is_dir()])
+        patient_ids = [d.name for d in patient_dirs]
         
         print(f"\nFound {len(patient_dirs)} patient directories")
         print(f"Output directory: {self.output_dir}")
         
-        # Process each patient
+        # Determine number of workers
+        # If using GPU, we want to limit parallelism to avoid OOM or contention
+        # If using CPU, we use all available cores
+        if self.use_gpu and HAS_GPU:
+            max_workers = 1  # Serialize GPU tasks to avoid OOM
+            print("  Parallelism disabled to ensure GPU stability (1 worker)")
+        else:
+            cpu_count = os.cpu_count() or 1
+            max_workers = max(1, cpu_count - 1) # Leave one core for system
+            print(f"  Using {max_workers} parallel workers for CPU processing")
+
         results = {}
-        for patient_dir in patient_dirs:
-            patient_id = patient_dir.name
-            success = self.process_patient(patient_id)
-            results[patient_id] = success
+        
+        if max_workers > 1:
+            # Prepare arguments for wrapper
+            process_args = [(self, pid) for pid in patient_ids]
+            
+            with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+                # Map returns results in order
+                future_results = list(executor.map(_process_wrapper, process_args))
+                
+            # Combine results
+            for pid, success in zip(patient_ids, future_results):
+                results[pid] = success
+        else:
+            # Sequential processing
+            for pid in patient_ids:
+                results[pid] = self.process_patient(pid)
         
         # Summary
         print(f"\n{'='*60}")

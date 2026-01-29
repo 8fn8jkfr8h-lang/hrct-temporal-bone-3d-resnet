@@ -156,185 +156,72 @@ processed_data/
 
 ---
 
-### **Phase 2: ROI Extraction Pipeline**
+### **Phase 2: ROI Extraction Pipeline (SMICNet Integration)**
 
-**Selected Approach: Per-Ear Processing (Lateral Split Already Complete)**
+**Selected Approach: Deep Learning Landmark Detection (SMICNet)**
 
-Since Phase 1 has already separated left and right temporal bones, Phase 2 processes each ear volume independently. This is superior because each ear can have different optimal slice ranges.
+We utilize the pre-trained **SMICNet** model (specialized for cochlear landmark detection in CT) to robustly identify the cochlea, which serves as a stable anatomical anchor for the middle ear.
 
-> **Note:** Lateral splitting is now performed in Phase 1 during DICOM ingestion. Each patient directory contains `left/` and `right/` subdirectories with pre-separated volumes.
+#### **Stage 1: Automatic Landmark Detection**
+**Script:** `pipeline/phase2a_landmark_detection.py`
 
-#### **Stage 1: Temporal Bone Localization (Per Side)**
-```
-For EACH side (left and right) independently:
-Input: Pre-split hemicranial volume from Phase 1
-       ├─ left/axial_volume.npy or right/axial_volume.npy
-       └─ Already normalized [0,1], bone-windowed
+**Input:** Pre-split hemicranial volume from Phase 1 (`axial_volume.npy`).
 
-Objective: Locate temporal bone within hemicranial volume
+**Method:**
+1. **Coarse Search:** Scan the volume with a sliding window (large stride) to identify the general region of the cochlea using the SMICNet classifier.
+2. **Fine Search:** Perform a dense sliding window search around the best candidate region to generate probability maps for three landmarks:
+   - Apex of Cochlea
+   - Basal Turn of Cochlea
+   - Round Window
+3. **Centroid Extraction:** Compute the weighted center of mass for each probability map to obtain sub-voxel coordinates (x, y, z).
 
-Method: Coarse localization
-├─ Detect bone regions (HU > 300 equivalent in normalized scale)
-├─ Identify petrous temporal bone (densest lateral structure)
-├─ Find approximate center of temporal bone mass
-├─ Extract sub-volume with generous 3D bounding box
-│   └─ Typical: 150×150×100 voxels
-└─ This becomes the "temporal bone volume" for next stage
+**Output:** JSON file containing the 3D coordinates of the detected landmarks for each ear.
 
-Output per side:
-└─ temporal_bone_volume.npy: (~100, 150, 150)
-```
+#### **Stage 2: Geometric ROI Extraction**
+**Script:** `pipeline/phase2b_roi_from_landmarks.py`
 
-#### **Stage 2: Anatomical Landmark Detection (Per Side)**
-```
-For EACH temporal bone volume independently:
+**Input:** Detected landmarks and the original volume.
 
-Objective: Identify key landmarks for middle ear localization
+**Method:**
+1. **Center Calculation:** Derive the center of the middle ear ROI using anatomical offsets relative to the detected **Basal Turn**.
+   - **Z (Vertical):** Aligned with the Basal Turn.
+   - **Y (Anterior-Posterior):** Centered between the Apex and Basal Turn.
+   - **X (Lateral):** Offset laterally (outwards) from the Basal Turn to capture the middle ear cavity.
+2. **Fixed Z-Bounding (Center & Expand):**
+   - **Target Z-depth:** Fixed 128 slices (~42.88mm) to ensure coverage of Tegmen and Jugular Bulb.
+   - **Algorithm:** $z_{start} = c_z - 64$, $z_{end} = c_z + 64$.
+   - **Padding:** If the calculated range exceeds volume limits (top or bottom), pad with "Air" (value 0).
+3. **Extraction:** Crop the fixed volume: `(128, 128, 128)`.
 
-Method: CNN-based landmark detector OR classical CV
-├─ Detect landmarks:
-│   ├─ Internal Auditory Canal (IAC)
-│   ├─ Cochlea (spiral structure)
-│   ├─ Vestibule
-│   ├─ Horizontal Semicircular Canal (HSC)
-│   ├─ External Auditory Canal (EAC)
-│   └─ Middle ear cavity (air-filled space)
-├─ Output 3D coordinates for each landmark
-├─ Calculate middle ear centroid from landmark positions
-└─ Cross-validate using anatomical relationships
+**Output:**
+- `axial_roi.npy`: The cropped 3D volume containing the middle ear (128, 128, 128).
+- `roi_metadata.json`: Metadata including bounds and QC metrics.
+- `roi_preview.png`: Visualization of the center slice.
 
-This runs completely independently for left vs right:
-- No coordination needed between sides
-- Each ear processed with its own optimal parameters
-```
-
-**Why this approach:**
-- More robust than template matching
-- Leverages deep learning for complex anatomy
-- Handles anatomical variations per ear
-- GPU availability allows sophisticated methods
-- Independent processing = simpler debugging
-
-#### **Stage 3: Optimal Slice Range Selection (Per Side)**
-```
-For EACH side independently:
-
-Objective: Extract slices containing complete middle ear anatomy
-
-Method: Landmark-guided adaptive extraction
-├─ Identify central slice (maximum middle ear cavity visibility)
-├─ Use HSC position as superior reference point
-├─ Use jugular bulb/carotid as inferior reference point
-├─ Calculate slice range: typically 30-40 slices per ear
-│   └─ ADAPTIVE: Left ear may use slices 45-80
-│                Right ear may use slices 52-87
-│                DIFFERENT ranges are expected and optimal!
-└─ Extract this specific range for this ear
-
-Key advantage: Each ear gets its own optimal slice range
-- Accounts for anatomical asymmetry
-- Maximizes pathology capture per ear
-- More accurate than forcing same range for both ears
-
-Output per side:
-└─ Variable-length slice stack (30-40 slices, differs per ear)
-```
-
-#### **Stage 4: Middle Ear ROI Cropping (Per Side)**
-```
-For EACH slice stack independently:
-
-Objective: Crop to middle ear region at native resolution
-
-Method: Centered crop
-├─ Use middle ear centroid from landmark detection
-├─ Crop 224×224 pixels around centroid
-├─ Apply to all slices in the stack
-└─ Maintain native resolution (0.229mm pixel spacing)
-
-Output per side:
-└─ roi_axial.npy: (30-40, 224, 224) - variable length
-```
-
-#### **Stage 5: Coronal ROI Extraction (Per Side)**
-```
-For EACH temporal bone volume independently:
-Input: Coronal volume already reconstructed in Phase 1 (left/coronal_volume.npy)
-
-Objective: Extract coronal ROI for facial nerve assessment
-
-Method: Landmark-guided extraction (using landmarks from Stage 2)
-├─ Use middle ear centroid from landmark detection
-├─ Apply same slice range logic as axial (Stage 3)
-├─ Extract 20-30 coronal slices through temporal bone region
-├─ Crop to 224×224 around middle ear centroid
-└─ Result: Coronal ROI stack matching axial ROI
-
-Note: Coronal reconstruction was already performed in Phase 1.
-      This stage extracts the ROI from the pre-existing coronal volume.
-
-Output per side:
-└─ roi_coronal.npy: (20-30, 224, 224) - variable length
-```
-
-#### **Stage 6: Laterality Standardization (Per Side)**
-```
-For EACH side independently:
-
-Right ears only:
-├─ Apply horizontal flip (mirror image)
-├─ Now all ears appear in "left ear" canonical orientation
-├─ Metadata preserves original laterality
-└─ Enables single unified model training
-
-Left ears:
-└─ No transformation needed (already canonical orientation)
-
-Output per case:
-├─ Standardized ROI (all appear as "left ear")
-└─ metadata.json: {"original_side": "L" or "R"}
-```
+**Advantages:**
+- **Robustness:** Handles anatomical variations and head tilt better than rigid registration.
+- **Precision:** Anchors the ROI to the cochlea, which is a stable bony structure.
+- **Completeness:** Fixed 64-slice depth ensures critical superior/inferior structures are not clipped, with attention mechanisms handling any empty padding.
 
 **Complete Data Structure (After Phase 1 + Phase 2):**
 ```
 processed_data/
 ├─ pt_01/
 │  ├─ left/
-│  │  │  # --- Phase 1 Outputs (DICOM Ingestion & Split) ---
-│  │  ├─ axial_volume.npy        # (~N, 768, ~404) - half-head axial volume
-│  │  ├─ coronal_volume.npy      # Isotropic coronal reconstruction, half-head
-│  │  ├─ metadata.json           # spacing, side='L', dimensions
-│  │  │
-│  │  │  # --- Phase 2 Outputs (ROI Extraction) ---
-│  │  ├─ temporal_bone_volume.npy  # (100, 150, 150) - coarse localization
-│  │  ├─ roi_axial.npy             # (35, 224, 224) - variable slice count
-│  │  ├─ roi_coronal.npy           # (25, 224, 224) - variable slice count
-│  │  └─ landmarks.json            # IAC, HSC, cochlea coordinates
-│  │
+│  │  ├─ axial_volume.npy
+│  │  └─ ...
 │  └─ right/
-│     │  # --- Phase 1 Outputs ---
-│     ├─ axial_volume.npy
-│     ├─ coronal_volume.npy
-│     ├─ metadata.json
-│     │  # --- Phase 2 Outputs ---
-│     ├─ temporal_bone_volume.npy
-│     ├─ roi_axial.npy             # (38, 224, 224) - DIFFERENT from left
-│     ├─ roi_coronal.npy           # (27, 224, 224) - DIFFERENT from left
-│     └─ landmarks.json
+│     └─ ...
 │
-├─ pt_02/
+roi_extracted/
+├─ pt_01/
 │  ├─ left/
-│  │  └─ ... (same structure)
+│  │  ├─ axial_roi.npy             # (64, 224, 224) - Final ROI
+│  │  ├─ roi_metadata.json         # Bounds, center, QC info
+│  │  └─ roi_preview.png           # QC Image
 │  └─ right/
-│     └─ ... (may be excluded if revision case)
+│     └─ ...
 ```
-
-**Expected Output:** 
-- ~120-150 independent ear ROI volumes (after exclusions)
-- Each ear with its own optimal slice range (30-40 axial, 20-30 coronal)
-- Each with axial and coronal views
-- Consistent orientation (all standardized to "left ear" appearance)
-- Variable slice counts handled by adaptive pooling in model
 
 ---
 
@@ -375,7 +262,7 @@ pt_02,R,1,1,0,revision,EXCLUDE,"Revision mastoidectomy 2022"
 
 **Exclusion Status:**
 - include = Use in dataset
-- EXCLUDE = Remove from dataset (revision cases, poor quality, etc.)
+- exclude = Remove from dataset (revision cases, poor quality, etc.)
 
 **Critical Rules:**
 - Label each ear independently (bilateral cases = separate rows)
@@ -427,86 +314,38 @@ After splitting, analyze:
 
 ### **Phase 5: Model Development**
 
-Given **high-end GPU availability**, optimize for **maximum accuracy**.
+**Architecture: MedicalNet (3D ResNet-18) with CBAM Attention**
 
-#### **Architecture: Multi-Stream 3D CNN with Attention**
+We leverage **MedicalNet**, a 3D ResNet pre-trained on a large aggregation of medical datasets (lungs, brains, livers), ensuring the model understands 3D anatomical features better than random initialization or Kinetics-700 (video) pre-training.
 
-**Model Choice: 3D ResNet-50 or 3D EfficientNet-B4 Backbone**
+#### **Core Architecture**
 
-With high-end GPU, we can use true 3D CNNs (superior to 2.5D for volumetric data).
+**1. The Backbone: ResNet-18 (3D)**
+- **Choice:** ResNet-18 is selected as the "Goldilocks" model.
+    - ResNet-10 is too shallow for complex bone erosion features.
+    - ResNet-50 is too large for our dataset size (~100 patients), risking overfitting.
+- **Weights:** Initialize with `resnet_18_23dataset.pth` (MedicalNet weights).
 
-```python
-TemporalBoneClassifier_v2:
-  
-  Dual-Stream Architecture:
-  
-  Stream 1: Axial Volume Processing
-    Input: (variable 30-40, 224, 224, 1) - variable-length axial slices
-    ├─ 3D ResNet-50 backbone (pretrained on Kinetics-700 or MedicalNet)
-    ├─ 3D Adaptive Average Pooling to handle variable slice counts
-    │   └─ AdaptiveAvgPool3d(output_size=(8, 7, 7))
-    │   └─ Converts (30-40, 28, 28) → (8, 7, 7) fixed size
-    ├─ 3D spatial attention modules (capture relevant regions)
-    └─ Feature vector: 2048 dimensions
-  
-  Stream 2: Coronal Volume Processing
-    Input: (variable 20-30, 224, 224, 1) - variable-length coronal slices
-    ├─ 3D ResNet-50 backbone (shared weights with Stream 1)
-    ├─ Specialized for facial nerve canal visualization
-    ├─ 3D Adaptive Average Pooling (same as Stream 1)
-    ├─ 3D spatial attention modules
-    └─ Feature vector: 2048 dimensions
-  
-  Feature Fusion:
-    ├─ Concatenate axial and coronal features: 4096-dim
-    ├─ Multi-head self-attention layer (learn inter-stream relationships)
-    ├─ Fully connected fusion: FC(4096 → 1024) → ReLU → Dropout(0.4)
-    └─ Shared representation: 1024 dimensions
-  
-  Classification Heads (Separate for Each Pathology):
-    
-    Cholesteatoma Head:
-      ├─ FC(1024 → 512) → ReLU → Dropout(0.3)
-      ├─ FC(512 → 256) → ReLU → Dropout(0.3)
-      ├─ FC(256 → 1) → Sigmoid
-      └─ Output: P(cholesteatoma) ∈ [0,1]
-    
-    Ossicular Head:
-      ├─ FC(1024 → 512) → ReLU → Dropout(0.3)
-      ├─ FC(512 → 256) → ReLU → Dropout(0.3)
-      ├─ FC(256 → 1) → Sigmoid
-      └─ Output: P(ossicular_discontinuity) ∈ [0,1]
-    
-    Facial Nerve Head:
-      ├─ Enhanced coronal stream weighting (facial nerve better on coronal)
-      ├─ FC(1024 → 512) → ReLU → Dropout(0.3)
-      ├─ FC(512 → 256) → ReLU → Dropout(0.3)
-      ├─ FC(256 → 1) → Sigmoid
-      └─ Output: P(facial_dehiscence) ∈ [0,1]
-```
+**2. Input Modification: Single Channel**
+- MedicalNet expects multi-channel input by default.
+- **Modification:** Replace the first convolutional layer to accept **1 channel** (Grayscale CT).
+  ```python
+  model.conv1 = nn.Conv3d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
+  ```
 
-**Key Architecture Features:**
+**3. Attention Mechanism: CBAM (Convolutional Block Attention Module)**
+- **Purpose:** To handle the fixed 64-slice input which may contain "air" padding. The attention module learns to "downweight" empty padding and focus on the bony anatomy.
+- **Placement:** Inserted after each Residual Block (Layer 1, Layer 2, Layer 3).
+- **Components:**
+    - **Channel Attention:** Focuses on *what* features are meaningful.
+    - **Spatial Attention:** Focuses on *where* the informative regions are (ignoring air).
 
-**3D CNN Advantages:**
-- Native volumetric processing (better than 2.5D stacking)
-- Captures true 3D spatial relationships
-- Better for subtle bone defects (facial nerve dehiscence)
-- State-of-art for medical imaging
+#### **Classification Heads**
+(Separate heads for each pathology attached to the global pooling output of the backbone)
 
-**Dual-Stream Design:**
-- Axial stream: Primary view for cholesteatoma and ossicular chain
-- Coronal stream: Superior for facial nerve canal and scutum
-- Combined features leverage both perspectives
-
-**Attention Mechanisms:**
-- 3D spatial attention highlights relevant anatomical regions
-- Reduces impact of irrelevant background structures
-- Improves interpretability
-
-**Separate Classification Heads:**
-- Independent probability calibration per pathology
-- Pathology-specific feature learning
-- Better handles varying documentation rates (facial nerve)
+1.  **Cholesteatoma Head:** FC -> ReLU -> Dropout -> FC -> Sigmoid
+2.  **Ossicular Head:** FC -> ReLU -> Dropout -> FC -> Sigmoid
+3.  **Facial Nerve Head:** FC -> ReLU -> Dropout -> FC -> Sigmoid
 
 ---
 

@@ -4,6 +4,7 @@ Comprehensive quality checks on processed volumes
 """
 
 import numpy as np
+import pandas as pd
 import json
 from pathlib import Path
 from typing import Dict, List, Any
@@ -116,7 +117,7 @@ def validate_metadata(metadata_path: Path) -> Dict[str, Any]:
     return results
 
 
-def validate_patient(patient_dir: Path) -> Dict[str, Any]:
+def validate_patient(patient_dir: Path, labels_df: pd.DataFrame = None) -> Dict[str, Any]:
     """Validate all data for one patient"""
     
     patient_id = patient_dir.name
@@ -127,11 +128,28 @@ def validate_patient(patient_dir: Path) -> Dict[str, Any]:
     }
     
     for side in ['left', 'right']:
+        side_letter = 'L' if side == 'left' else 'R'
+        is_excluded = False
+        
+        # Check exclusion status if labels provided
+        if labels_df is not None:
+            label_row = labels_df[
+                (labels_df['patient_id'] == patient_id) & 
+                (labels_df['ear'] == side_letter)
+            ]
+            if not label_row.empty:
+                status = str(label_row.iloc[0]['exclusion_status']).strip().lower()
+                if status == 'exclude':
+                    is_excluded = True
+        
         side_dir = patient_dir / side
         
         if not side_dir.exists():
-            results['valid'] = False
-            results['ears'][side] = {'error': 'Directory does not exist'}
+            if is_excluded:
+                results['ears'][side] = {'status': 'excluded', 'valid': True}
+            else:
+                results['valid'] = False
+                results['ears'][side] = {'error': 'Directory does not exist (and not excluded)', 'valid': False}
             continue
         
         ear_results: Dict[str, Any] = {
@@ -156,7 +174,7 @@ def validate_patient(patient_dir: Path) -> Dict[str, Any]:
 
 
 
-def run_validation(data_dir='processed_data') -> List[Dict[str, Any]]:
+def run_validation(data_dir='processed_data', labels_file='labels.csv') -> List[Dict[str, Any]]:
     """
     Run validation on all processed data
     
@@ -175,6 +193,18 @@ def run_validation(data_dir='processed_data') -> List[Dict[str, Any]]:
         print("Run pipeline/phase1_dicom_ingestion.py first")
         return []
     
+    # Load labels if available
+    labels_df = None
+    if Path(labels_file).exists():
+        try:
+            import pandas as pd
+            labels_df = pd.read_csv(labels_file)
+            print(f"Loaded exclusion labels from {labels_file}")
+        except Exception as e:
+            print(f"Warning: Could not load {labels_file}: {e}")
+    else:
+        print(f"Warning: {labels_file} not found. Validation will not check exclusion status.")
+    
     patients = sorted([d for d in data_dir.iterdir() if d.is_dir()])
     
     print(f"\nValidating {len(patients)} patients...\n")
@@ -183,7 +213,7 @@ def run_validation(data_dir='processed_data') -> List[Dict[str, Any]]:
     valid_count = 0
     
     for patient_dir in patients:
-        results = validate_patient(patient_dir)
+        results = validate_patient(patient_dir, labels_df)
         all_results.append(results)
         
         if results['valid']:
@@ -209,11 +239,15 @@ def run_validation(data_dir='processed_data') -> List[Dict[str, Any]]:
         print(f"\n{patient_id}: {status}")
         
         for side, ear_results in results['ears'].items():
+            if 'status' in ear_results and ear_results['status'] == 'excluded':
+                print(f"  {side.upper()}: ⚪ EXCLUDED (Skipped)")
+                continue
+                
             if 'error' in ear_results:
                 print(f"  {side.upper()}: ❌ {ear_results['error']}")
                 continue
             
-            ear_status = "✅" if ear_results['valid'] else "❌"
+            ear_status = "✅" if ear_results.get('valid', False) else "❌"
             print(f"  {side.upper()}: {ear_status}")
             
             # Axial

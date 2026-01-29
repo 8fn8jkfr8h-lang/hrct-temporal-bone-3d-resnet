@@ -13,6 +13,8 @@ This script:
 """
 
 import sys
+import time
+import argparse
 from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
 
@@ -22,9 +24,16 @@ from utils.validation import run_validation
 from utils.viewer_batch import run_batch_viewer
 
 
+
 def main():
-    """Main execution function"""
+    """Main execution function with timing"""
     
+    parser = argparse.ArgumentParser(description="Phase 1: DICOM Ingestion")
+    args = parser.parse_args()
+
+    # Enable GPU by default (no flag required)
+    use_gpu = True
+
     # Configuration
     INPUT_DIR = 'dicom_input'
     OUTPUT_DIR = 'processed_data'
@@ -34,11 +43,26 @@ def main():
     print("PHASE 1: DICOM INGESTION AND PREPROCESSING")
     print("="*60)
     
+    if use_gpu:
+        print("GPU acceleration enabled by default.")
+    
+    phase_start_time = time.time()
+    
     # Initialize processor
-    processor = DICOMProcessor(INPUT_DIR, OUTPUT_DIR, LABELS_FILE)
+    processor = DICOMProcessor(INPUT_DIR, OUTPUT_DIR, LABELS_FILE, use_gpu=use_gpu)
     
     # Process all patients
+    processing_start = time.time()
     processor.process_all_patients()
+    processing_time = time.time() - processing_start
+    
+    phase_total_time = time.time() - phase_start_time
+    
+    print(f"\n{'='*60}")
+    print("PHASE 1 TIMING SUMMARY")
+    print(f"{'='*60}")
+    print(f"⏱️  Processing time: {processing_time:.2f}s ({processing_time/60:.1f} min)")
+    print(f"⏱️  Total phase time: {phase_total_time:.2f}s ({phase_total_time/60:.1f} min)")
     
     print(f"\n{'='*60}")
     print("Phase 1 complete!")
@@ -55,6 +79,7 @@ def main():
     # Automatically run batch viewer
     print("Running batch viewer (utils.viewer_batch)...")
     run_batch_viewer()
+
 
 if __name__ == '__main__':
     main()

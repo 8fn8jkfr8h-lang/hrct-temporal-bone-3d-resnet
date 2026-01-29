@@ -31,10 +31,17 @@ def create_patient_overview(patient_dir: Path, output_dir: Path):
         side_dir = patient_dir / side
         
         if not side_dir.exists():
-            # Hide all axes for this side if data doesn't exist
+            # Hide axes but show text for this side
             for row in range(2):
                 for col in range(3):
                     axes[base_row + row, col].axis('off')
+            
+            # Place text in the middle of this side's rows
+            # We use the middle axes of the first row of this side
+            axes[base_row, 1].text(0.5, 0.5, f"{side.upper()} EAR\nSKIPPED / EXCLUDED", 
+                                  ha='center', va='center', fontsize=14, color='red',
+                                  transform=axes[base_row, 1].transAxes,
+                                  bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
             continue
         
         # Load data

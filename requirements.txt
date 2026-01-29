@@ -2,8 +2,15 @@ pydicom
 pylibjpeg
 pylibjpeg-libjpeg
 SimpleITK
-numpy
+numpy<2.0.0
 pandas
 scikit-image
 opencv-python
 matplotlib
+tensorflow==2.10.0
+scipy
+multipledispatch
+pynrrd
+tqdm
+albumentations
+scikit-learn

@@ -9,26 +9,34 @@ AI-based detection of middle ear pathologies from HRCT temporal bone scans.
 ```
 HRCT_Temporal/
 ├── dicom_input/              # Raw DICOM files
-├── processed_data/           # Preprocessed volumes
+├── processed_data/           # Preprocessed volumes (Phase 1)
+├── landmarks_detected/       # Detected 3D landmarks (Phase 2A)
+├── roi_extracted/            # Final Middle Ear ROIs (Phase 2B)
 ├── visualizations/           # Generated overview images
 │
 ├── pipeline/                 # Main pipeline phases
 │   ├── phase1_dicom_ingestion.py       ✅ Complete
-│   ├── phase2_roi_extraction.py        🔄 TODO
+│   ├── phase2a_landmark_detection.py   ✅ Complete (SMICNet)
+│   ├── phase2b_roi_from_landmarks.py   ✅ Complete
 │   ├── phase3_dataset_stratification.py 🔄 TODO
 │   ├── phase4_model_training.py        🔄 TODO
 │   └── phase5_model_evaluation.py      🔄 TODO
 │
-├── utils/                    # Utilities and tools
-│   ├── dicom_processor.py   # DICOM processing
-│   ├── validation.py        # Data validation
-│   ├── generate_report.py   # Statistics report
-│   ├── viewer_interactive.py # Interactive viewer
-│   └── viewer_batch.py      # Batch overview
+├── smicnet/                  # Submodule: Landmark detection
+│   ├── TrainedNetworkWeights/  # Pre-trained models
+│   └── ...
 │
-├── labels.csv               # Surgical findings
-├── requirements.txt         # Dependencies
-└── temporal_bone_project.md # Full specification
+├── utils/                    # Utilities and tools
+│   ├── dicom_processor.py    # DICOM processing
+│   ├── validation.py         # Data validation
+│   ├── generate_report.py    # Statistics report
+│   ├── viewer_interactive.py # Interactive viewer
+│   ├── viewer_batch.py       # Batch overview
+│   └── roi_reviewer.py       # ROI review tool (Phase 2C)
+│
+├── labels.csv                # Surgical findings
+├── requirements.txt          # Dependencies
+└── temporal_bone_project.md  # Full specification
 ```
 
 ---
@@ -38,6 +46,9 @@ HRCT_Temporal/
 ### 1. Install Dependencies
 
 ```bash
+# Recommended: Use Conda for GPU support
+conda create -n ear_ai python=3.9
+conda activate ear_ai
 pip install -r requirements.txt
 ```
 
@@ -47,26 +58,22 @@ pip install -r requirements.txt
 python pipeline/phase1_dicom_ingestion.py
 ```
 
-### 3. Validate Results
+### 3. Detect Landmarks (SMICNet)
+
+```bash
+python pipeline/phase2a_landmark_detection.py
+```
+
+### 4. Extract ROIs
+
+```bash
+python pipeline/phase2b_roi_from_landmarks.py
+```
+
+### 5. Validate Results
 
 ```bash
 python -m utils.validation
-```
-
-### 4. Manual Verification
-
-```bash
-# Interactive viewer
-python -m utils.viewer_interactive
-
-# Or batch overview
-python -m utils.viewer_batch
-```
-
-### 5. Generate Report
-
-```bash
-python -m utils.generate_report
 ```
 
 ---
@@ -83,34 +90,58 @@ Preprocesses raw DICOM files into standardized volumes.
 3. Applies bone windowing (Width: 4000, Level: 700)
 4. Reconstructs coronal views from full volume (isotropic 0.335mm)
 5. Splits left/right temporal bones (20px overlap)
-6. Saves processed volumes
+6. Filters based on `labels.csv` (`exclusion_status` column)
+7. Saves processed volumes for included ears only
 
 **Output:** `processed_data/pt_XX/[left|right]/`
 - `axial_volume.npy` - Axial slices (normalized 0-1)
 - `coronal_volume.npy` - Coronal slices (normalized 0-1)
 - `metadata.json` - Spacing, dimensions, patient info
 
-**Note:** Coronal views are reconstructed from the full volume. The machine learning pipeline (Phase 2 & 3) processes data based on array indices, not visual orientation. The data is topologically correct (Index 0 = Feet, Index N = Head).
+---
+
+### ✅ Phase 2: SMICNet-Based ROI Extraction (Complete)
+
+Extracts anatomically centered, bounded 3D ROIs of the middle ear using Deep Learning based landmark detection.
+
+**What it does:**
+
+#### Phase 2A: Automatic Landmark Detection
+1. Loads pre-trained SMICNet model.
+2. Performs a coarse grid search on the volume to find the general cochlea region.
+3. Performs a fine sliding window search to generate probability maps for:
+   - Apex
+   - Basal Turn
+   - Round Window
+4. Extracts 3D centroids for each landmark.
+
+#### Phase 2B: ROI Extraction
+1. Calculates the middle ear center based on the detected Basal Turn and Apex.
+2. Computes **fixed Z-bounds** (Center ± 64 slices).
+3. Extracts a fixed 128x128 XY region and fixed 128-slice Z region (padding with air if needed).
+4. Performs quality control checks (bone content, dimensions).
+
+**Output:** `roi_extracted/pt_XX/[left|right]/`
+- `axial_roi.npy` - ROI volume (128, 128, 128)
+- `roi_metadata.json` - Center (x,y,z), bounds, QC results
+- `roi_preview.png` - Visualization of the ROI center slice
+
+**ROI Specifications:**
+- X-Y dimensions: Fixed 128×128 pixels (42.88 mm)
+- Z dimension: Fixed 128 slices (42.88 mm) with padding
+- Spacing: Isotropic 0.335 mm
 
 ---
 
-### 🔄 Phase 2: ROI Extraction (TODO)
+### 🔄 Phase 3: Dataset Stratification (TODO)
 
-Extract middle ear regions from processed volumes.
-
-**Planned:**
-1. Temporal bone localization
-2. Anatomical landmark detection
-3. Optimal slice range selection
-4. Middle ear ROI cropping (224×224)
-5. Laterality standardization
+Train/val/test split with stratification by pathology labels.
 
 ---
 
-### 🔄 Phase 3-5: Model Development (TODO)
+### 🔄 Phase 4-5: Model Development (TODO)
 
-- Phase 3: Dataset stratification (train/val/test split)
-- Phase 4: Model training (3D ResNet-50 dual-stream)
+- Phase 4: Model training (MedicalNet 3D ResNet-18 with CBAM Attention)
 - Phase 5: Model evaluation (metrics, Grad-CAM, error analysis)
 
 ---
@@ -132,22 +163,6 @@ python -m utils.viewer_interactive
 - `l/r` : Left / Right ear
 - `n/p` : Next / Previous patient
 - `q` : Quit
-
-**Note:** The viewer applies a vertical flip to the coronal view for correct anatomical display (Head at top).
-
-### Batch Viewer
-
-Generate overview images:
-
-```bash
-python -m utils.viewer_batch
-```
-
-Output: `visualizations/pt_XX_overview.png`
-
-**Layout:** 4 rows × 3 columns
-- Rows 1-2: Left ear (3 axial slices + 3 coronal slices)
-- Rows 3-4: Right ear (3 axial slices + 3 coronal slices)
 
 ### Validation
 
@@ -171,82 +186,4 @@ Output: `processing_report.csv`
 
 ---
 
-## Loading Data
-
-```python
-import numpy as np
-import json
-
-# Load volumes
-axial = np.load('processed_data/pt_01/left/axial_volume.npy')
-coronal = np.load('processed_data/pt_01/left/coronal_volume.npy')
-
-# Load metadata
-with open('processed_data/pt_01/left/metadata.json') as f:
-    meta = json.load(f)
-
-print(f"Axial: {axial.shape}")    # (slices, 768, 404)
-print(f"Coronal: {coronal.shape}")  # (slices, height, width)
-print(f"Spacing: {meta['pixel_spacing']} mm")
-```
-
----
-
-## Technical Details
-
-### Preprocessing Pipeline
-
-1. **Slice Sorting:** By `ImagePositionPatient[2]` (Z-coordinate), not filename
-2. **HU Conversion:** `HU = pixel_value × RescaleSlope + RescaleIntercept`
-3. **Bone Windowing:** Width=4000, Level=700, normalized to [0, 1]
-4. **Coronal Reconstruction:** SimpleITK multiplanar reformation (orthogonal) from full volume, isotropic 0.335mm
-5. **Lateral Split:** Midline at x=384 with 20px overlap for both axial and coronal
-
-**Design Rationale:** Coronal reconstruction is done on the full volume before splitting to maintain proper anatomical proportions. Phase 2 ROI extraction will crop to temporal bone regions in both views.
-
-### Data Format
-
-**Axial volumes:** `(slices, 768, 404)` float32, range [0, 1] - half-width after split  
-**Coronal volumes:** `(slices, height, width)` float32, range [0, 1] - half-width after split  
-**Metadata:** JSON with spacing, dimensions, patient info
-
-### Visualization
-The raw data is stored with index 0 = Inferior (Feet). The visualization tools (`viewer_interactive.py` and `viewer_batch.py`) apply a vertical flip to the coronal view so that it appears "Head-up" for human inspection. The ML pipeline consumes the raw data without this flip.
-
-### Validation Results
-
-✅ All processed data passed validation:
-- No NaN or Inf values
-- Values in [0, 1] range
-- Correct dimensions
-- Complete metadata
-- Proper anatomical orientation
-
----
-
-## Troubleshooting
-
-**JPEG-LS decompression error:**
-```bash
-pip install pylibjpeg pylibjpeg-libjpeg
-```
-
-**No DICOM files found:**  
-Ensure files are in `dicom_input/pt_XX/` with pattern `0_*`
-
-**Import errors:**
-```bash
-pip install -r requirements.txt
-```
-
----
-
-## Next Steps
-
-1. Manual verification using interactive viewer
-2. Implement Phase 2: ROI extraction
-3. Continue with dataset stratification and model training
-
----
-
-**Status:** Phase 1 Complete ✅ | Ready for Phase 2
+**Status:** Phase 1 & 2 Complete ✅ | Ready for Phase 3
