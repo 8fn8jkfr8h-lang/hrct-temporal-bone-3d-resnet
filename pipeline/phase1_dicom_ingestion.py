@@ -21,7 +21,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 from utils.dicom_processor import DICOMProcessor
 from utils.generate_report import generate_report
 from utils.validation import run_validation
-from utils.viewer_batch import run_batch_viewer
+from utils.phase1_overview import run_batch_viewer
 
 
 

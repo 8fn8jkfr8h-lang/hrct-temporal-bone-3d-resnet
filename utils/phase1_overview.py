@@ -93,7 +93,7 @@ def run_batch_viewer():
     """Main function"""
     
     data_dir = Path('processed_data')
-    output_dir = Path('visualizations')
+    output_dir = Path(data_dir,'overview')
     output_dir.mkdir(exist_ok=True)
     
     print("="*60)
