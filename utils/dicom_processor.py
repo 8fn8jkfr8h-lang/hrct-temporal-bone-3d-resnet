@@ -13,6 +13,8 @@ from typing import Dict, Tuple
 import concurrent.futures
 import os
 import warnings
+import gc
+import datetime
 warnings.filterwarnings('ignore')
 
 # Try to import cupy for GPU acceleration
@@ -299,56 +301,116 @@ class DICOMProcessor:
         return left_volume, right_volume
     
     def process_patient(self, patient_id: str) -> bool:
-        """Process a single patient through the full pipeline"""
+        """Process a single patient through the full pipeline with retries and memory management"""
         print(f"\n{'='*60}")
         print(f"Processing {patient_id}")
         print(f"{'='*60}")
         
         patient_dir = self.input_dir / patient_id
+        patient_output = self.output_dir / patient_id
         
         if not patient_dir.exists():
             print(f"  ERROR: Directory not found: {patient_dir}")
             return False
-        
-        try:
-            # Load and sort DICOM slices
-            axial_volume, metadata = self.load_and_sort_dicom_series(patient_dir)
             
-            # Convert to Hounsfield Units
-            print(f"\n  Converting to Hounsfield Units...")
-            hu_volume = self.convert_to_hounsfield_units(axial_volume, metadata)
-            
-            # Apply bone windowing
-            print(f"\n  Applying bone windowing...")
-            windowed_volume = self.apply_bone_windowing(hu_volume)
-            
-            # Reconstruct coronal view from FULL volume first
-            print(f"\n  Reconstructing coronal view...")
-            coronal_volume = self.reconstruct_coronal_view(windowed_volume, metadata)
-            
-            # Split left/right for both axial and coronal
-            print(f"\n  Splitting lateral hemispheres (axial)...")
-            left_axial, right_axial = self.split_lateral_hemispheres(windowed_volume)
-            
-            print(f"\n  Splitting lateral hemispheres (coronal)...")
-            left_coronal, right_coronal = self.split_lateral_hemispheres(coronal_volume)
-            
-            # Save processed data
-            print(f"\n  Saving processed data...")
-            self.save_processed_data(
-                patient_id, metadata,
-                left_axial, right_axial,
-                left_coronal, right_coronal
-            )
-            
-            print(f"\n  Successfully processed {patient_id}")
+        # Check for completion marker
+        if (patient_output / '.complete').exists():
+            print(f"  Skipping {patient_id}: Already processed (found .complete marker)")
             return True
+        
+        MAX_RETRIES = 3
+        
+        for attempt in range(MAX_RETRIES):
+            # Initialize variables to None for safe cleanup
+            axial_volume = None
+            hu_volume = None
+            windowed_volume = None
+            coronal_volume = None
+            left_axial = None
+            right_axial = None
+            left_coronal = None
+            right_coronal = None
             
-        except Exception as e:
-            print(f"\n  ERROR processing {patient_id}: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
+            try:
+                if attempt > 0:
+                    print(f"  Retry attempt {attempt + 1}/{MAX_RETRIES} for {patient_id}...")
+                    gc.collect()
+                
+                # Load and sort DICOM slices
+                axial_volume, metadata = self.load_and_sort_dicom_series(patient_dir)
+                
+                # Convert to Hounsfield Units
+                print(f"\n  Converting to Hounsfield Units...")
+                hu_volume = self.convert_to_hounsfield_units(axial_volume, metadata)
+                
+                # Free memory
+                del axial_volume
+                axial_volume = None
+                gc.collect()
+                
+                # Apply bone windowing
+                print(f"\n  Applying bone windowing...")
+                windowed_volume = self.apply_bone_windowing(hu_volume)
+                
+                # Free memory
+                del hu_volume
+                hu_volume = None
+                gc.collect()
+                
+                # Reconstruct coronal view from FULL volume first
+                print(f"\n  Reconstructing coronal view...")
+                coronal_volume = self.reconstruct_coronal_view(windowed_volume, metadata)
+                
+                # Split left/right for both axial and coronal
+                print(f"\n  Splitting lateral hemispheres (axial)...")
+                left_axial, right_axial = self.split_lateral_hemispheres(windowed_volume)
+                
+                # Free memory - windowed_volume no longer needed
+                del windowed_volume
+                windowed_volume = None
+                gc.collect()
+                
+                print(f"\n  Splitting lateral hemispheres (coronal)...")
+                left_coronal, right_coronal = self.split_lateral_hemispheres(coronal_volume)
+                
+                # Free memory - coronal_volume no longer needed
+                del coronal_volume
+                coronal_volume = None
+                gc.collect()
+                
+                # Save processed data
+                print(f"\n  Saving processed data...")
+                self.save_processed_data(
+                    patient_id, metadata,
+                    left_axial, right_axial,
+                    left_coronal, right_coronal
+                )
+                
+                print(f"\n  Successfully processed {patient_id}")
+                return True
+                
+            except Exception as e:
+                print(f"\n  ERROR processing {patient_id} (Attempt {attempt + 1}/{MAX_RETRIES}): {e}")
+                
+                # Explicit cleanup
+                del axial_volume, hu_volume, windowed_volume, coronal_volume
+                del left_axial, right_axial, left_coronal, right_coronal
+                gc.collect()
+                
+                if attempt == MAX_RETRIES - 1:
+                    import traceback
+                    traceback.print_exc()
+                    
+                    # Log to file
+                    try:
+                        log_file = Path('failed_patients.log')
+                        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        with open(log_file, 'a') as f:
+                            f.write(f"[{timestamp}] {patient_id}: {str(e)}\n")
+                    except Exception as log_err:
+                        print(f"  Failed to write to log file: {log_err}")
+                        
+                    return False
     
     def is_ear_excluded(self, patient_id: str, side: str) -> bool:
         """Check if a specific ear should be excluded based on labels.csv"""
@@ -417,6 +479,9 @@ class DICOMProcessor:
             print(f"    Saved right ear to {right_dir}")
         else:
             print(f"    Skipping right ear (exclusion_status='exclude')")
+            
+        # Create completion marker
+        (patient_output / '.complete').touch()
     
     def process_all_patients(self):
         """Process all patients in the input directory"""
