@@ -1,6 +1,7 @@
 # PROJECT SUMMARY: AI-Based Temporal Bone HRCT Pathology Detection
 
 ## **TEAM COMPOSITION**
+
 - **Radiology Resident (PGY1):** Model development, technical implementation, analysis
 - **ENT Resident (PGY2):** Dataset curation, surgical findings documentation, clinical validation
 - **Project Type:** Joint research thesis + peer-reviewed publication
@@ -13,11 +14,13 @@
 **Objective:** Develop an AI system to detect middle ear pathologies on HRCT temporal bone scans and validate against intraoperative findings (gold standard).
 
 **Target Pathologies (Priority Order):**
+
 1. **Cholesteatoma** (PRIMARY - most clinically important)
 2. **Ossicular chain discontinuity** (SECONDARY)
 3. **Facial nerve dehiscence** (EXPLORATORY - if reliably documented)
 
 **Clinical Context:**
+
 - Preoperative HRCT assessment is standard of care
 - Accurate detection guides surgical planning
 - Current limitation: Radiologist interpretation variability
@@ -28,6 +31,7 @@
 ## **DATASET CHARACTERISTICS**
 
 ### **Patient Cohort:**
+
 - **Total:** ~100 patients with HRCT scans
 - **Expected final:** ~80-90 patients after exclusions
 - **All cases:** Confirmed surgical findings available
@@ -37,6 +41,7 @@
 - **Validation approach:** AI predictions vs intraoperative findings ONLY
 
 ### **Inclusion Criteria:**
+
 - ✅ First-time temporal bone surgery (primary cases only)
 - ✅ No prior middle ear/mastoid surgery on that ear
 - ✅ Complete HRCT thin slice series available
@@ -44,6 +49,7 @@
 - ✅ Adequate image quality
 
 ### **Exclusion Criteria:**
+
 - ❌ Revision/redo mastoidectomy or tympanoplasty
 - ❌ Any prior middle ear surgery on ipsilateral ear
 - ❌ Congenital temporal bone malformations
@@ -57,6 +63,7 @@
 **Scanner:** Philips Ingenuity Core 128
 
 **Key Parameters:**
+
 - **Slice thickness:** 0.67mm (excellent for temporal bone)
 - **Slice spacing:** 0.335mm
 - **Pixel spacing:** 0.229mm × 0.229mm
@@ -67,6 +74,7 @@
 - **Acquisition:** Spiral CT
 
 **Data Organization:**
+
 ```
 pt_01/
   ├─ 0_0.dcm
@@ -107,6 +115,7 @@ pt_02/
 ### **Phase 1: Data Infrastructure & Lateral Splitting**
 
 **DICOM Processing:**
+
 - Load DICOM series with proper slice ordering (sort by ImagePositionPatient[2])
 - Verify slice continuity and spacing consistency
 - Apply bone windowing (Width: 4000, Level: 700)
@@ -114,12 +123,14 @@ pt_02/
 - Quality checks for completeness and artifacts
 
 **Coronal Reconstruction:**
+
 - Use SimpleITK resampling for multiplanar reformats
 - Maintain isotropic spacing (0.335mm based on acquisition)
 - Generate coronal views from FULL volume first
 - Output both axial and coronal volumes
 
 **Lateral Split (Left/Right Separation):**
+
 - Performed on BOTH axial and coronal volumes after reconstruction
 - Sagittal plane splitting at midline (x = width/2)
 - 20px margin overlap at midline to prevent edge artifacts
@@ -127,12 +138,14 @@ pt_02/
 - Each ear processed and saved independently from this point onwards
 
 **Why split in Phase 1:**
+
 - Ensures consistent separation across all subsequent processing steps
 - Reduces memory footprint for Phase 2+ operations (half-volume processing)
 - Aligns with clinical workflow (each ear is independent diagnostic unit)
 - Simplifies ROI extraction in Phase 2 (no lateral disambiguation needed)
 
 **Output Structure:**
+
 ```
 processed_data/
 ├─ pt_01/
@@ -163,11 +176,13 @@ processed_data/
 We utilize the pre-trained **SMICNet** model (specialized for cochlear landmark detection in CT) to robustly identify the cochlea, which serves as a stable anatomical anchor for the middle ear.
 
 #### **Stage 1: Automatic Landmark Detection**
+
 **Script:** `pipeline/phase2a_landmark_detection.py`
 
 **Input:** Pre-split hemicranial volume from Phase 1 (`axial_volume.npy`).
 
 **Method:**
+
 1. **Coarse Search:** Scan the volume with a sliding window (large stride) to identify the general region of the cochlea using the SMICNet classifier.
 2. **Fine Search:** Perform a dense sliding window search around the best candidate region to generate probability maps for three landmarks:
    - Apex of Cochlea
@@ -178,11 +193,13 @@ We utilize the pre-trained **SMICNet** model (specialized for cochlear landmark 
 **Output:** JSON file containing the 3D coordinates of the detected landmarks for each ear.
 
 #### **Stage 2: Geometric ROI Extraction**
+
 **Script:** `pipeline/phase2b_roi_from_landmarks.py`
 
 **Input:** Detected landmarks and the original volume.
 
 **Method:**
+
 1. **Center Calculation:** Derive the center of the middle ear ROI using anatomical offsets relative to the detected **Basal Turn**.
    - **Z (Vertical):** Aligned with the Basal Turn.
    - **Y (Anterior-Posterior):** Centered between the Apex and Basal Turn.
@@ -194,16 +211,19 @@ We utilize the pre-trained **SMICNet** model (specialized for cochlear landmark 
 3. **Extraction:** Crop the fixed volume: `(128, 128, 128)`.
 
 **Output:**
+
 - `axial_roi.npy`: The cropped 3D volume containing the middle ear (128, 128, 128).
 - `roi_metadata.json`: Metadata including bounds and QC metrics.
 - `roi_preview.png`: Visualization of the center slice.
 
 **Advantages:**
+
 - **Robustness:** Handles anatomical variations and head tilt better than rigid registration.
 - **Precision:** Anchors the ROI to the cochlea, which is a stable bony structure.
 - **Completeness:** Fixed 64-slice depth ensures critical superior/inferior structures are not clipped, with attention mechanisms handling any empty padding.
 
 **Complete Data Structure (After Phase 1 + Phase 2):**
+
 ```
 processed_data/
 ├─ pt_01/
@@ -232,6 +252,7 @@ roi_extracted/
 ENT resident creates master label spreadsheet from surgical notes.
 
 **Label Sheet Structure:**
+
 ```csv
 patient_id,ear,cholesteatoma,ossicular_discontinuity,facial_dehiscence,surgery_type,exclusion_status,notes
 pt_01,L,1,1,1,primary,include,"Attic cholesteatoma, incus erosion, FN dehiscence tympanic"
@@ -243,28 +264,34 @@ pt_02,R,1,1,0,revision,EXCLUDE,"Revision mastoidectomy 2022"
 **Labeling Protocol:**
 
 **Cholesteatoma:**
+
 - 0 = Absent (confirmed normal intraop OR clear on CT in non-surgical ear)
 - 1 = Present (any location: attic, sinus, pars tensa, mastoid)
 
 **Ossicular Discontinuity:**
+
 - 0 = Intact chain (malleus-incus-stapes connected and mobile)
 - 1 = Discontinuity (erosion, dislocation, fixation confirmed intraop)
 
 **Facial Nerve Dehiscence:**
+
 - 0 = Intact bony canal (confirmed during surgery)
 - 1 = Dehiscence present (bony defect identified)
 - NULL = Not documented/not visualized during surgery
 
 **Surgery Type:**
+
 - primary = First-time surgery for this ear
 - revision = Prior surgery on same ear
 - none = No surgery (contralateral normal ear)
 
 **Exclusion Status:**
+
 - include = Use in dataset
 - exclude = Remove from dataset (revision cases, poor quality, etc.)
 
 **Critical Rules:**
+
 - Label each ear independently (bilateral cases = separate rows)
 - Only include patients with surgical confirmation
 - For bilateral cases: exclude any ear with prior surgery
@@ -302,6 +329,7 @@ Stratification:
 ```
 
 **Class Imbalance Assessment:**
+
 ```
 After splitting, analyze:
 ├─ Positive/negative ratio for each pathology
@@ -321,12 +349,14 @@ We leverage **MedicalNet**, a 3D ResNet pre-trained on a large aggregation of me
 #### **Core Architecture**
 
 **1. The Backbone: ResNet-18 (3D)**
+
 - **Choice:** ResNet-18 is selected as the "Goldilocks" model.
-    - ResNet-10 is too shallow for complex bone erosion features.
-    - ResNet-50 is too large for our dataset size (~100 patients), risking overfitting.
+  - ResNet-10 is too shallow for complex bone erosion features.
+  - ResNet-50 is too large for our dataset size (~100 patients), risking overfitting.
 - **Weights:** Initialize with `resnet_18_23dataset.pth` (MedicalNet weights).
 
 **2. Input Modification: Single Channel**
+
 - MedicalNet expects multi-channel input by default.
 - **Modification:** Replace the first convolutional layer to accept **1 channel** (Grayscale CT).
   ```python
@@ -334,13 +364,15 @@ We leverage **MedicalNet**, a 3D ResNet pre-trained on a large aggregation of me
   ```
 
 **3. Attention Mechanism: CBAM (Convolutional Block Attention Module)**
+
 - **Purpose:** To handle the fixed 64-slice input which may contain "air" padding. The attention module learns to "downweight" empty padding and focus on the bony anatomy.
 - **Placement:** Inserted after each Residual Block (Layer 1, Layer 2, Layer 3).
 - **Components:**
-    - **Channel Attention:** Focuses on *what* features are meaningful.
-    - **Spatial Attention:** Focuses on *where* the informative regions are (ignoring air).
+  - **Channel Attention:** Focuses on _what_ features are meaningful.
+  - **Spatial Attention:** Focuses on _where_ the informative regions are (ignoring air).
 
 #### **Classification Heads**
+
 (Separate heads for each pathology attached to the global pooling output of the backbone)
 
 1.  **Cholesteatoma Head:** FC -> ReLU -> Dropout -> FC -> Sigmoid
@@ -372,6 +404,7 @@ FL(p) = -α(1-p)^γ log(p)
 ```
 
 **Handling NULL Labels (Facial Nerve):**
+
 ```python
 For cases where facial_dehiscence = NULL:
 ├─ Exclude from loss computation for facial nerve head
@@ -473,6 +506,7 @@ Gradient Accumulation: 2-4 steps if needed
 #### **Handling Class Imbalance**
 
 **Assessment After Labeling:**
+
 ```
 For each pathology, calculate:
 ├─ Positive/negative ratio
@@ -483,18 +517,21 @@ For each pathology, calculate:
 **Strategy Selection Based on Imbalance:**
 
 **Mild Imbalance (ratio 1:2 to 1:3):**
+
 ```
 ├─ Weighted Binary Cross-Entropy
 └─ pos_weight = (num_negative / num_positive)
 ```
 
 **Moderate Imbalance (ratio 1:3 to 1:5):**
+
 ```
 ├─ Focal Loss with α=0.25, γ=2
 └─ Oversample minority class by 1.5x
 ```
 
 **Severe Imbalance (ratio > 1:5):**
+
 ```
 ├─ Focal Loss with α=0.25, γ=2
 ├─ Oversample minority class by 2x
@@ -503,6 +540,7 @@ For each pathology, calculate:
 ```
 
 **Threshold Optimization:**
+
 ```
 For each pathology:
 ├─ Generate predictions on validation set
@@ -514,9 +552,10 @@ For each pathology:
 
 ---
 
-### **Phase 6: Advanced Techniques (If Time/Resources Permit)**
+### **Phase 6: Advanced Techniques (If Time/Resources Permit)** - OPTIONAL
 
 **Ensemble Methods:**
+
 ```
 Train 5 models with different:
 ├─ Random initialization seeds
@@ -530,6 +569,7 @@ Ensemble prediction:
 ```
 
 **Semi-Supervised Learning (If unlabeled data available):**
+
 ```
 If ENT has additional HRCT scans without surgical confirmation:
 ├─ Use pseudo-labeling on unlabeled data
@@ -539,6 +579,7 @@ If ENT has additional HRCT scans without surgical confirmation:
 ```
 
 **Transfer Learning from Related Tasks:**
+
 ```
 Consider pretraining on:
 ├─ MedicalNet (3D medical imaging pretrained weights)
@@ -570,6 +611,7 @@ With 95% Confidence Intervals:
 ```
 
 **Threshold Selection:**
+
 ```
 Cholesteatoma (Primary Outcome):
 └─ Optimize for F1-score (balance sensitivity/PPV)
@@ -582,6 +624,7 @@ Facial Nerve Dehiscence (Exploratory):
 ```
 
 **Multi-Threshold Analysis:**
+
 ```
 Report performance at multiple operating points:
 ├─ High sensitivity threshold (e.g., 90% sensitivity)
@@ -618,14 +661,14 @@ For each misclassified case:
    └─ Consider CT-surgery discordance
 
 4. Error Categorization:
-   
+
    False Positives (Model says YES, Surgery says NO):
    ├─ Inflammation/granulation mimicking cholesteatoma
    ├─ Fluid/mucosal thickening misclassified
    ├─ Normal anatomical variants (high jugular bulb, etc.)
    ├─ Image artifacts causing false appearance
    └─ Model overconfident on equivocal findings
-   
+
    False Negatives (Model says NO, Surgery says YES):
    ├─ Small/subtle cholesteatoma (< 3mm)
    ├─ Unusual location (sinus tympani, facial recess)
@@ -798,3 +841,4 @@ Secondary Hypotheses:
 ├─ AI specificity ≥ 80% for cholesteatoma
 ├─ AI AUC ≥ 0.85 for cholesteatoma
 ├─ AI sensitivity ≥ 70
+```

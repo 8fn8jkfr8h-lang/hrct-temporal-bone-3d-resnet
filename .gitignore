@@ -16,6 +16,11 @@ processed_data/
 visualizations/
 roi_extracted/
 landmarks_detected/
+dataset_splits*/
+evaluation_results*/
+models/fold*
+models_validation/
+pretrained/
 *.png
 *.jpg
 *.jpeg
@@ -24,3 +29,4 @@ landmarks_detected/
 labels.csv
 processing_report.csv
 *.log
+*.json

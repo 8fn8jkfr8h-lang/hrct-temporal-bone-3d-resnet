@@ -1,21 +1,15 @@
 # SMICNet
-import numpy
-numpy.float = float
-numpy.int = numpy.int_
 import tensorflow as tf
 from tensorflow.keras.layers import (
-    Activation,
     BatchNormalization,
     Conv2D,
     Dense,
     Dropout,
-    Flatten,
     MaxPooling2D,
 )
 
 from tensorflow.keras import regularizers
 from tensorflow.keras.layers import (
-    Activation,
     Add,
     BatchNormalization,
     Conv2D,
@@ -28,7 +22,6 @@ from tensorflow.keras.layers import (
     MaxPooling2D,
 )
 from tensorflow.keras.models import Model
-import tensorflow as tf
  
 def SMICNet_build():
     inputs = Input(shape=(81, 81, 1))# 2D image for the input 

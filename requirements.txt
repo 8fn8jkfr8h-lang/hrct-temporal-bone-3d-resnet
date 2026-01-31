@@ -2,7 +2,7 @@ pydicom
 pylibjpeg
 pylibjpeg-libjpeg
 SimpleITK
-numpy<2.0.0
+numpy>=1.22,<1.24
 pandas
 scikit-image
 opencv-python
@@ -12,5 +12,12 @@ scipy
 multipledispatch
 pynrrd
 tqdm
+gdown
 albumentations
 scikit-learn
+iterative-stratification
+monai==1.3.0
+seaborn
+
+# PyTorch with CUDA - Install separately using:
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121

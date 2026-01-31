@@ -1,19 +1,17 @@
 """
-Phase 3: Dataset Stratification (Production Script)
+Phase 3: Dataset Stratification (Validation Script)
 Temporal Bone HRCT Project
 
-Full-featured version for production dataset (100-120 patients):
-- Fixed test set allocation (15-20%)
-- 3-label stratification (cholesteatoma + ossicular + facial_nerve_presence)
+Simplified version for pipeline validation with limited dataset (24 patients):
+- NO fixed test set (use all data for 5-fold CV)
+- 2-label stratification (cholesteatoma + ossicular only)
 - Patient-level grouping to prevent data leakage from bilateral ears
-- 5-fold cross-validation on remaining data
 
 Usage:
-    python -m pipeline.phase3_dataset_stratification \
+    python -m pipeline.phase3_dataset_stratification_validation \
         --roi_dir roi_extracted \
         --labels_csv labels.csv \
-        --output_dir dataset_splits \
-        --test_ratio 0.18 \
+        --output_dir dataset_splits_validation \
         --cv_folds 5 \
         --random_seed 69
 """
@@ -27,8 +25,7 @@ from typing import Dict, List, Tuple, Any
 
 import numpy as np
 import pandas as pd
-from scipy.stats import chi2_contingency
-from iterstrat.ml_stratifiers import MultilabelStratifiedKFold, MultilabelStratifiedShuffleSplit
+from iterstrat.ml_stratifiers import MultilabelStratifiedKFold
 
 # Configure logging
 logging.basicConfig(
@@ -53,9 +50,9 @@ def load_and_validate_labels(labels_path: Path) -> pd.DataFrame:
     """
     logger.info(f"Loading labels from {labels_path}")
     
-    # Required columns for production (includes facial_dehiscence)
+    # Required columns
     required_cols = ['patient_id', 'ear', 'cholesteatoma', 'ossicular_discontinuity', 
-                     'facial_dehiscence', 'exclusion_status']
+                     'exclusion_status']
     
     df = pd.read_csv(labels_path)
     
@@ -86,9 +83,6 @@ def load_and_validate_labels(labels_path: Path) -> pd.DataFrame:
     # Create ear_id
     included_df['ear_id'] = included_df['patient_id'] + '_' + included_df['ear']
     
-    # Create facial_nerve_presence indicator (1 if value exists, 0 if NULL)
-    included_df['facial_nerve_presence'] = (~included_df['facial_dehiscence'].isna()).astype(int)
-    
     return included_df
 
 
@@ -101,7 +95,7 @@ def validate_roi_availability(labels_df: pd.DataFrame, roi_dir: Path) -> pd.Data
         roi_dir: Path to ROI extracted directory
         
     Returns:
-        DataFrame filtered to only samples with ROIs
+        DataFrame with added 'roi_exists' column, filtered to only samples with ROIs
     """
     logger.info(f"Validating ROI availability in {roi_dir}")
     
@@ -129,7 +123,7 @@ def validate_roi_availability(labels_df: pd.DataFrame, roi_dir: Path) -> pd.Data
 def create_patient_level_labels(labels_df: pd.DataFrame) -> Tuple[pd.DataFrame, np.ndarray]:
     """
     Create patient-level label matrix for stratification.
-    Uses OR logic for bilateral cases.
+    Uses OR logic for bilateral cases (if either ear is positive, patient is positive).
     
     Args:
         labels_df: DataFrame with ear-level labels
@@ -137,142 +131,65 @@ def create_patient_level_labels(labels_df: pd.DataFrame) -> Tuple[pd.DataFrame, 
     Returns:
         Tuple of:
         - Patient-level DataFrame with aggregated labels
-        - Label matrix (n_patients, 3) for stratification [chole, ossic, facial_presence]
+        - Label matrix (n_patients, 2) for stratification
     """
     logger.info("Creating patient-level labels with OR logic for bilateral cases")
     
     # Group by patient and aggregate labels
     patient_labels = labels_df.groupby('patient_id').agg({
-        'cholesteatoma': 'max',
+        'cholesteatoma': 'max',  # OR logic: max of 0/1 = 1 if any positive
         'ossicular_discontinuity': 'max',
-        'facial_dehiscence': 'max',
-        'facial_nerve_presence': 'max',
-        'ear_id': list,
+        'ear_id': list,  # Keep track of which ears belong to patient
         'ear_normalized': list
     }).reset_index()
     
     patient_labels.rename(columns={'ear_id': 'ear_ids', 'ear_normalized': 'ears'}, inplace=True)
     
-    # Fill NaN with 0 for stratification
+    # Fill NaN with 0 for stratification (treat unknown as negative)
     patient_labels['cholesteatoma'] = patient_labels['cholesteatoma'].fillna(0).astype(int)
     patient_labels['ossicular_discontinuity'] = patient_labels['ossicular_discontinuity'].fillna(0).astype(int)
-    patient_labels['facial_nerve_presence'] = patient_labels['facial_nerve_presence'].fillna(0).astype(int)
     
-    # Create label matrix for stratification [cholesteatoma, ossicular, facial_presence]
-    label_matrix = patient_labels[['cholesteatoma', 'ossicular_discontinuity', 'facial_nerve_presence']].values
+    # Create label matrix for stratification [cholesteatoma, ossicular]
+    label_matrix = patient_labels[['cholesteatoma', 'ossicular_discontinuity']].values
     
     logger.info(f"Patient-level statistics:")
     logger.info(f"  Total patients: {len(patient_labels)}")
     logger.info(f"  Cholesteatoma positive: {label_matrix[:, 0].sum()}")
     logger.info(f"  Ossicular discontinuity positive: {label_matrix[:, 1].sum()}")
-    logger.info(f"  Facial nerve data present: {label_matrix[:, 2].sum()}")
     
     return patient_labels, label_matrix
 
 
-def allocate_test_set(
+def create_cv_splits(
     patient_labels: pd.DataFrame,
     label_matrix: np.ndarray,
-    test_ratio: float = 0.18,
-    random_seed: int = 69
-) -> Tuple[List[str], List[str], np.ndarray, np.ndarray]:
-    """
-    Allocate fixed test set using stratified sampling.
-    
-    Args:
-        patient_labels: Patient-level DataFrame
-        label_matrix: Label matrix for stratification
-        test_ratio: Fraction of patients for test set
-        random_seed: Random seed for reproducibility
-        
-    Returns:
-        Tuple of (trainval_patient_ids, test_patient_ids, trainval_labels, test_labels)
-    """
-    logger.info(f"Allocating test set ({test_ratio*100:.0f}% of patients)")
-    
-    patient_ids = patient_labels['patient_id'].values
-    
-    msss = MultilabelStratifiedShuffleSplit(n_splits=1, test_size=test_ratio, random_state=random_seed)
-    
-    for trainval_idx, test_idx in msss.split(patient_ids, label_matrix):
-        trainval_patient_ids = patient_ids[trainval_idx].tolist()
-        test_patient_ids = patient_ids[test_idx].tolist()
-        trainval_labels = label_matrix[trainval_idx]
-        test_labels = label_matrix[test_idx]
-    
-    logger.info(f"  Train/Val patients: {len(trainval_patient_ids)}")
-    logger.info(f"  Test patients: {len(test_patient_ids)}")
-    
-    return trainval_patient_ids, test_patient_ids, trainval_labels, test_labels
-
-
-def create_test_set_json(
-    test_patient_ids: List[str],
-    patient_labels: pd.DataFrame,
-    labels_df: pd.DataFrame
-) -> Dict[str, Any]:
-    """Create test set JSON structure."""
-    
-    # Get ear IDs for test patients
-    test_ear_ids = []
-    for pid in test_patient_ids:
-        ear_ids = patient_labels[patient_labels['patient_id'] == pid]['ear_ids'].values[0]
-        test_ear_ids.extend(ear_ids)
-    
-    # Calculate class distribution
-    test_ears_df = labels_df[labels_df['patient_id'].isin(test_patient_ids)]
-    
-    def count_distribution(series):
-        positive = int((series == 1).sum())
-        negative = int((series == 0).sum())
-        null = int(series.isna().sum())
-        return {'positive': positive, 'negative': negative, 'null': null} if null > 0 else {'positive': positive, 'negative': negative}
-    
-    return {
-        'patient_ids': test_patient_ids,
-        'ear_ids': test_ear_ids,
-        'n_patients': len(test_patient_ids),
-        'n_ears': len(test_ear_ids),
-        'class_distribution': {
-            'cholesteatoma': count_distribution(test_ears_df['cholesteatoma']),
-            'ossicular_discontinuity': count_distribution(test_ears_df['ossicular_discontinuity']),
-            'facial_nerve_dehiscence': count_distribution(test_ears_df['facial_dehiscence'])
-        }
-    }
-
-
-def create_cv_splits(
-    trainval_patient_ids: List[str],
-    trainval_labels: np.ndarray,
-    patient_labels: pd.DataFrame,
     n_folds: int = 5,
     random_seed: int = 69
 ) -> List[Dict[str, Any]]:
     """
-    Create stratified k-fold cross-validation splits.
+    Create stratified k-fold cross-validation splits at patient level.
     
     Args:
-        trainval_patient_ids: Patient IDs for train/val (excluding test set)
-        trainval_labels: Label matrix for stratification
-        patient_labels: Full patient-level DataFrame
+        patient_labels: Patient-level DataFrame
+        label_matrix: Label matrix for stratification
         n_folds: Number of CV folds
         random_seed: Random seed for reproducibility
         
     Returns:
-        List of fold dictionaries
+        List of fold dictionaries with train/val splits
     """
-    logger.info(f"Creating {n_folds}-fold CV splits on train/val data")
+    logger.info(f"Creating {n_folds}-fold CV splits with seed {random_seed}")
     
     mskf = MultilabelStratifiedKFold(n_splits=n_folds, shuffle=True, random_state=random_seed)
     
-    trainval_patient_ids = np.array(trainval_patient_ids)
+    patient_ids = patient_labels['patient_id'].values
     folds = []
     
-    for fold_idx, (train_idx, val_idx) in enumerate(mskf.split(trainval_patient_ids, trainval_labels)):
-        train_patient_ids = trainval_patient_ids[train_idx].tolist()
-        val_patient_ids = trainval_patient_ids[val_idx].tolist()
+    for fold_idx, (train_idx, val_idx) in enumerate(mskf.split(patient_ids, label_matrix)):
+        train_patient_ids = patient_ids[train_idx].tolist()
+        val_patient_ids = patient_ids[val_idx].tolist()
         
-        # Get ear IDs
+        # Get ear IDs for train and val
         train_ear_ids = []
         val_ear_ids = []
         
@@ -285,8 +202,8 @@ def create_cv_splits(
             val_ear_ids.extend(ear_ids)
         
         # Calculate class distribution
-        train_labels = trainval_labels[train_idx]
-        val_labels = trainval_labels[val_idx]
+        train_labels = label_matrix[train_idx]
+        val_labels = label_matrix[val_idx]
         
         fold_data = {
             'fold': fold_idx,
@@ -302,17 +219,13 @@ def create_cv_splits(
                 'cholesteatoma': {'positive': int(train_labels[:, 0].sum()), 
                                   'negative': int((1 - train_labels[:, 0]).sum())},
                 'ossicular_discontinuity': {'positive': int(train_labels[:, 1].sum()),
-                                            'negative': int((1 - train_labels[:, 1]).sum())},
-                'facial_nerve_presence': {'positive': int(train_labels[:, 2].sum()),
-                                          'negative': int((1 - train_labels[:, 2]).sum())}
+                                            'negative': int((1 - train_labels[:, 1]).sum())}
             },
             'val_distribution': {
                 'cholesteatoma': {'positive': int(val_labels[:, 0].sum()),
                                   'negative': int((1 - val_labels[:, 0]).sum())},
                 'ossicular_discontinuity': {'positive': int(val_labels[:, 1].sum()),
-                                            'negative': int((1 - val_labels[:, 1]).sum())},
-                'facial_nerve_presence': {'positive': int(val_labels[:, 2].sum()),
-                                          'negative': int((1 - val_labels[:, 2]).sum())}
+                                            'negative': int((1 - val_labels[:, 1]).sum())}
             }
         }
         
@@ -324,71 +237,45 @@ def create_cv_splits(
     return folds
 
 
-def check_class_balance(folds: List[Dict], label_name: str = 'cholesteatoma') -> Tuple[float, float]:
+def validate_splits(folds: List[Dict], patient_labels: pd.DataFrame) -> bool:
     """
-    Check class distribution balance across folds using chi-square test.
+    Validate that splits are correct (no data leakage, all patients covered).
     
+    Args:
+        folds: List of fold dictionaries
+        patient_labels: Patient-level DataFrame
+        
     Returns:
-        Tuple of (chi2_statistic, p_value)
+        True if validation passes
     """
-    # Build contingency table: rows = folds, cols = [positive, negative]
-    observed = []
-    for fold in folds:
-        dist = fold['val_distribution'][label_name]
-        observed.append([dist['positive'], dist['negative']])
-    
-    observed = np.array(observed)
-    
-    # Only run test if we have variation
-    if observed.sum(axis=0).min() == 0:
-        return 0.0, 1.0
-    
-    chi2, p_value, dof, expected = chi2_contingency(observed)
-    return chi2, p_value
-
-
-def validate_splits(
-    folds: List[Dict],
-    test_set: Dict,
-    patient_labels: pd.DataFrame
-) -> bool:
-    """Validate split integrity."""
     logger.info("Validating split integrity...")
     
     all_valid = True
     all_patients = set(patient_labels['patient_id'])
-    test_patients = set(test_set['patient_ids'])
     
-    # Check test set doesn't overlap with any train/val
     for fold in folds:
+        fold_idx = fold['fold']
         train_set = set(fold['train_patient_ids'])
         val_set = set(fold['val_patient_ids'])
         
-        # No overlap with test
-        if train_set & test_patients:
-            logger.error(f"Fold {fold['fold']}: Train overlaps with test set!")
-            all_valid = False
-        if val_set & test_patients:
-            logger.error(f"Fold {fold['fold']}: Val overlaps with test set!")
+        # Check no overlap
+        overlap = train_set & val_set
+        if overlap:
+            logger.error(f"Fold {fold_idx}: Overlap between train and val: {overlap}")
             all_valid = False
         
-        # No overlap between train and val
-        if train_set & val_set:
-            logger.error(f"Fold {fold['fold']}: Train/val overlap!")
+        # Check all patients covered
+        covered = train_set | val_set
+        missing = all_patients - covered
+        if missing:
+            logger.error(f"Fold {fold_idx}: Missing patients: {missing}")
             all_valid = False
         
-        # All trainval patients covered
-        fold_patients = train_set | val_set
-        trainval_patients = all_patients - test_patients
-        if fold_patients != trainval_patients:
-            logger.error(f"Fold {fold['fold']}: Missing or extra patients in train/val!")
+        # Check no extra patients
+        extra = covered - all_patients
+        if extra:
+            logger.error(f"Fold {fold_idx}: Extra patients not in dataset: {extra}")
             all_valid = False
-    
-    # Chi-square test for balance
-    chi2, p_value = check_class_balance(folds, 'cholesteatoma')
-    logger.info(f"Chi-square test for cholesteatoma balance: chi2={chi2:.2f}, p={p_value:.4f}")
-    if p_value < 0.05:
-        logger.warning("Significant class imbalance across folds detected!")
     
     if all_valid:
         logger.info("All validation checks passed!")
@@ -396,68 +283,47 @@ def validate_splits(
     return all_valid
 
 
-def print_summary(
-    folds: List[Dict],
-    test_set: Dict,
-    patient_labels: pd.DataFrame,
-    label_matrix: np.ndarray
-):
+def print_summary(folds: List[Dict], patient_labels: pd.DataFrame, label_matrix: np.ndarray):
     """Print summary statistics table."""
-    print("\n" + "=" * 90)
-    print("DATASET STRATIFICATION SUMMARY (PRODUCTION)")
-    print("=" * 90)
+    print("\n" + "=" * 80)
+    print("DATASET STRATIFICATION SUMMARY (VALIDATION)")
+    print("=" * 80)
     
     print(f"\nTotal Patients: {len(patient_labels)}")
     total_ears = sum(len(ears) for ears in patient_labels['ear_ids'])
     print(f"Total Ears: {total_ears}")
     
-    print(f"\nTest Set: {test_set['n_patients']} patients ({test_set['n_ears']} ears)")
-    print(f"Train/Val: {len(patient_labels) - test_set['n_patients']} patients")
-    
     print(f"\nOverall Class Distribution (Patient-Level):")
     print(f"  Cholesteatoma:           {label_matrix[:, 0].sum():3d} positive / {len(label_matrix):3d} total ({100*label_matrix[:, 0].mean():.1f}%)")
     print(f"  Ossicular Discontinuity: {label_matrix[:, 1].sum():3d} positive / {len(label_matrix):3d} total ({100*label_matrix[:, 1].mean():.1f}%)")
-    print(f"  Facial Nerve Data:       {label_matrix[:, 2].sum():3d} present / {len(label_matrix):3d} total ({100*label_matrix[:, 2].mean():.1f}%)")
     
-    print(f"\nTest Set Class Distribution:")
-    for label, dist in test_set['class_distribution'].items():
-        pos = dist['positive']
-        neg = dist['negative']
-        null = dist.get('null', 0)
-        print(f"  {label}: +{pos} / -{neg} / null:{null}")
-    
-    print(f"\nFold Summary (Train/Val only, excludes test set):")
-    print("-" * 90)
-    print(f"{'Fold':<6} {'Train Pts':<12} {'Val Pts':<10} {'Train Chole+':<14} {'Val Chole+':<12}")
-    print("-" * 90)
+    print(f"\nFold Summary:")
+    print("-" * 80)
+    print(f"{'Fold':<6} {'Train Pts':<12} {'Val Pts':<10} {'Train Chole+':<14} {'Val Chole+':<12} {'Train Ossic+':<14} {'Val Ossic+':<12}")
+    print("-" * 80)
     
     for fold in folds:
         train_chole = fold['train_distribution']['cholesteatoma']['positive']
         val_chole = fold['val_distribution']['cholesteatoma']['positive']
+        train_ossic = fold['train_distribution']['ossicular_discontinuity']['positive']
+        val_ossic = fold['val_distribution']['ossicular_discontinuity']['positive']
         
         print(f"{fold['fold']:<6} {fold['n_train_patients']:<12} {fold['n_val_patients']:<10} "
-              f"{train_chole:<14} {val_chole:<12}")
+              f"{train_chole:<14} {val_chole:<12} {train_ossic:<14} {val_ossic:<12}")
     
-    print("-" * 90)
+    print("-" * 80)
     print()
 
 
 def save_outputs(
     folds: List[Dict],
-    test_set: Dict,
     patient_labels: pd.DataFrame,
     label_matrix: np.ndarray,
     output_dir: Path,
     config: Dict[str, Any]
 ):
-    """Save all output files."""
+    """Save fold JSONs and metadata."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Save test set
-    test_path = output_dir / 'test_set.json'
-    with open(test_path, 'w') as f:
-        json.dump(test_set, f, indent=2)
-    logger.info(f"Saved {test_path}")
     
     # Save each fold
     for fold in folds:
@@ -473,12 +339,18 @@ def save_outputs(
         'random_seed': config['random_seed'],
         'n_total_patients': len(patient_labels),
         'n_total_ears': total_ears,
-        'test_percentage': round(100 * test_set['n_patients'] / len(patient_labels), 1),
         'cv_folds': config['cv_folds'],
-        'stratification_labels': ['cholesteatoma', 'ossicular_discontinuity', 'facial_nerve_presence'],
-        'script_version': 'production',
-        'exclusion_criteria': {
-            'excluded_patients': config.get('excluded_count', 0)
+        'stratification_labels': ['cholesteatoma', 'ossicular_discontinuity'],
+        'script_version': 'validation',
+        'overall_distribution': {
+            'cholesteatoma': {
+                'positive': int(label_matrix[:, 0].sum()),
+                'negative': int((1 - label_matrix[:, 0]).sum())
+            },
+            'ossicular_discontinuity': {
+                'positive': int(label_matrix[:, 1].sum()),
+                'negative': int((1 - label_matrix[:, 1]).sum())
+            }
         },
         'timestamp': datetime.now().isoformat()
     }
@@ -491,11 +363,10 @@ def save_outputs(
     # Save summary text
     summary_path = output_dir / 'split_summary.txt'
     with open(summary_path, 'w') as f:
-        f.write("DATASET STRATIFICATION SUMMARY (PRODUCTION)\n")
+        f.write("DATASET STRATIFICATION SUMMARY (VALIDATION)\n")
         f.write("=" * 60 + "\n\n")
         f.write(f"Total Patients: {len(patient_labels)}\n")
         f.write(f"Total Ears: {total_ears}\n")
-        f.write(f"Test Set: {test_set['n_patients']} patients ({test_set['n_ears']} ears)\n")
         f.write(f"CV Folds: {config['cv_folds']}\n")
         f.write(f"Random Seed: {config['random_seed']}\n")
         f.write(f"Generated: {metadata['timestamp']}\n")
@@ -504,7 +375,7 @@ def save_outputs(
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Phase 3: Dataset Stratification (Production Script)',
+        description='Phase 3: Dataset Stratification (Validation Script)',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     
@@ -512,10 +383,8 @@ def main():
                         help='Directory containing extracted ROIs')
     parser.add_argument('--labels_csv', type=str, default='labels.csv',
                         help='Path to labels CSV file')
-    parser.add_argument('--output_dir', type=str, default='dataset_splits',
+    parser.add_argument('--output_dir', type=str, default='dataset_splits_validation',
                         help='Output directory for split files')
-    parser.add_argument('--test_ratio', type=float, default=0.18,
-                        help='Fraction of patients for fixed test set')
     parser.add_argument('--cv_folds', type=int, default=5,
                         help='Number of cross-validation folds')
     parser.add_argument('--random_seed', type=int, default=69,
@@ -532,13 +401,12 @@ def main():
         'roi_dir': str(roi_dir),
         'labels_csv': str(labels_path),
         'output_dir': str(output_dir),
-        'test_ratio': args.test_ratio,
         'cv_folds': args.cv_folds,
         'random_seed': args.random_seed
     }
     
     logger.info("=" * 60)
-    logger.info("Phase 3: Dataset Stratification (Production)")
+    logger.info("Phase 3: Dataset Stratification (Validation)")
     logger.info("=" * 60)
     
     # Step 1: Load and validate labels
@@ -554,30 +422,21 @@ def main():
     # Step 3: Create patient-level labels
     patient_labels, label_matrix = create_patient_level_labels(labels_df)
     
-    # Step 4: Allocate test set
-    trainval_ids, test_ids, trainval_labels, test_labels = allocate_test_set(
-        patient_labels, label_matrix, args.test_ratio, args.random_seed
-    )
+    # Step 4: Create CV splits
+    folds = create_cv_splits(patient_labels, label_matrix, args.cv_folds, args.random_seed)
     
-    # Step 5: Create test set JSON
-    test_set = create_test_set_json(test_ids, patient_labels, labels_df)
-    
-    # Step 6: Create CV splits on remaining data
-    folds = create_cv_splits(trainval_ids, trainval_labels, patient_labels, 
-                            args.cv_folds, args.random_seed)
-    
-    # Step 7: Validate splits
-    if not validate_splits(folds, test_set, patient_labels):
+    # Step 5: Validate splits
+    if not validate_splits(folds, patient_labels):
         logger.error("Split validation failed!")
         return
     
-    # Step 8: Print summary
-    print_summary(folds, test_set, patient_labels, label_matrix)
+    # Step 6: Print summary
+    print_summary(folds, patient_labels, label_matrix)
     
-    # Step 9: Save outputs
-    save_outputs(folds, test_set, patient_labels, label_matrix, output_dir, config)
+    # Step 7: Save outputs
+    save_outputs(folds, patient_labels, label_matrix, output_dir, config)
     
-    logger.info("Phase 3 (Production) completed successfully!")
+    logger.info("Phase 3 (Validation) completed successfully!")
 
 
 if __name__ == '__main__':

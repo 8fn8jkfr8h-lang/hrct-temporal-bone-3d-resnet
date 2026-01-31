@@ -1,21 +1,20 @@
 """
-Phase 4: Model Training (Production Script)
+Phase 4: Model Training (Validation Script)
 Temporal Bone HRCT Project
 
-Full-featured production script for complete dataset (100-120 patients):
-- 3-head architecture (cholesteatoma + ossicular + facial_nerve)
-- 150 epochs with early stopping
-- Mixed precision training support
-- Comprehensive logging and checkpointing
+Simplified validation script for pipeline testing with limited dataset:
+- 2-head architecture (cholesteatoma + ossicular only)
+- Reduced epochs (50) and batch size (4)
+- Focus on verifying training loop works correctly
 
 Usage:
-    python -m pipeline.phase4_model_training \
-        --split_dir dataset_splits \
+    python -m pipeline.phase4_model_training_validation \
+        --split_dir dataset_splits_validation \
         --roi_dir roi_extracted \
         --labels_csv labels.csv \
-        --output_dir models \
+        --output_dir models_validation \
         --fold 0 \
-        --epochs 150
+        --epochs 50
 """
 
 import argparse
@@ -24,7 +23,7 @@ import logging
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Tuple
 
 import numpy as np
 import pandas as pd
@@ -51,9 +50,20 @@ logger = logging.getLogger(__name__)
 
 
 def compute_auc(y_true: np.ndarray, y_pred: np.ndarray, mask: np.ndarray) -> float:
-    """Compute AUC-ROC for valid samples."""
+    """
+    Compute AUC-ROC for valid samples.
+    
+    Args:
+        y_true: Ground truth labels
+        y_pred: Predicted probabilities
+        mask: Valid sample mask
+        
+    Returns:
+        AUC score or 0.5 if insufficient data
+    """
     from sklearn.metrics import roc_auc_score
     
+    # Filter valid samples
     valid_idx = mask > 0.5
     if valid_idx.sum() < 2:
         return float(0.5)
@@ -61,6 +71,7 @@ def compute_auc(y_true: np.ndarray, y_pred: np.ndarray, mask: np.ndarray) -> flo
     y_true_valid = y_true[valid_idx]
     y_pred_valid = y_pred[valid_idx]
     
+    # Check if we have both classes
     if len(np.unique(y_true_valid)) < 2:
         return float(0.5)
     
@@ -77,17 +88,14 @@ def train_one_epoch(
     optimizer: torch.optim.Optimizer,
     device: torch.device,
     epoch: int,
-    grad_accumulation_steps: int = 1,
-    scaler: Optional[Any] = None,
-    use_amp: bool = False
+    grad_accumulation_steps: int = 1
 ) -> Dict[str, float]:
-    """Train for one epoch with optional mixed precision."""
+    """Train for one epoch."""
     model.train()
     
     total_loss = 0.0
     loss_chole = 0.0
     loss_ossic = 0.0
-    loss_facial = 0.0
     n_batches = 0
     
     optimizer.zero_grad()
@@ -99,54 +107,35 @@ def train_one_epoch(
         labels = batch['labels'].to(device)
         masks = batch['mask'].to(device)
         
-        # Forward pass with optional AMP
-        if use_amp and scaler is not None:
-            with torch.amp.autocast('cuda'):
-                outputs = model(images)
-                loss, loss_dict = criterion(outputs, labels, masks)
-            
-            # Backward pass
-            loss = loss / grad_accumulation_steps
-            scaler.scale(loss).backward()
-            
-            if (batch_idx + 1) % grad_accumulation_steps == 0:
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad()
-        else:
-            outputs = model(images)
-            loss, loss_dict = criterion(outputs, labels, masks)
-            
-            loss = loss / grad_accumulation_steps
-            loss.backward()
-            
-            if (batch_idx + 1) % grad_accumulation_steps == 0:
-                optimizer.step()
-                optimizer.zero_grad()
+        # Forward pass
+        outputs = model(images)
+        loss, loss_dict = criterion(outputs, labels, masks)
+        
+        # Backward pass with gradient accumulation
+        loss = loss / grad_accumulation_steps
+        loss.backward()
+        
+        if (batch_idx + 1) % grad_accumulation_steps == 0:
+            optimizer.step()
+            optimizer.zero_grad()
         
         # Accumulate metrics
         total_loss += loss_dict['loss_total']
         loss_chole += loss_dict['loss_chole']
         loss_ossic += loss_dict['loss_ossic']
-        loss_facial += loss_dict.get('loss_facial', 0.0)
         n_batches += 1
         
         pbar.set_postfix({'loss': f"{loss_dict['loss_total']:.4f}"})
     
     # Final optimizer step if needed
     if n_batches % grad_accumulation_steps != 0:
-        if use_amp and scaler is not None:
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            optimizer.step()
+        optimizer.step()
         optimizer.zero_grad()
     
     return {
         'loss': total_loss / max(n_batches, 1),
         'loss_chole': loss_chole / max(n_batches, 1),
-        'loss_ossic': loss_ossic / max(n_batches, 1),
-        'loss_facial': loss_facial / max(n_batches, 1)
+        'loss_ossic': loss_ossic / max(n_batches, 1)
     }
 
 
@@ -156,8 +145,7 @@ def validate(
     val_loader: DataLoader,
     criterion: nn.Module,
     device: torch.device,
-    epoch: int,
-    num_tasks: int = 3
+    epoch: int
 ) -> Tuple[Dict[str, float], Dict[str, np.ndarray]]:
     """Validate the model."""
     model.eval()
@@ -165,7 +153,6 @@ def validate(
     total_loss = 0.0
     loss_chole = 0.0
     loss_ossic = 0.0
-    loss_facial = 0.0
     n_batches = 0
     
     all_preds = []
@@ -180,15 +167,17 @@ def validate(
         labels = batch['labels'].to(device)
         masks = batch['mask'].to(device)
         
+        # Forward pass
         outputs = model(images)
         loss, loss_dict = criterion(outputs, labels, masks)
         
+        # Accumulate metrics
         total_loss += loss_dict['loss_total']
         loss_chole += loss_dict['loss_chole']
         loss_ossic += loss_dict['loss_ossic']
-        loss_facial += loss_dict.get('loss_facial', 0.0)
         n_batches += 1
         
+        # Store predictions
         probs = torch.sigmoid(outputs).cpu().numpy()
         all_preds.append(probs)
         all_labels.append(labels.cpu().numpy())
@@ -197,6 +186,7 @@ def validate(
         
         pbar.set_postfix({'loss': f"{loss_dict['loss_total']:.4f}"})
     
+    # Concatenate all predictions
     all_preds = np.concatenate(all_preds, axis=0)
     all_labels = np.concatenate(all_labels, axis=0)
     all_masks = np.concatenate(all_masks, axis=0)
@@ -210,16 +200,9 @@ def validate(
         'loss_chole': loss_chole / max(n_batches, 1),
         'loss_ossic': loss_ossic / max(n_batches, 1),
         'auc_chole': auc_chole,
-        'auc_ossic': auc_ossic
+        'auc_ossic': auc_ossic,
+        'auc_mean': (auc_chole + auc_ossic) / 2
     }
-    
-    if num_tasks >= 3:
-        auc_facial = compute_auc(all_labels[:, 2], all_preds[:, 2], all_masks[:, 2])
-        metrics['loss_facial'] = loss_facial / max(n_batches, 1)
-        metrics['auc_facial'] = auc_facial
-        metrics['auc_mean'] = (auc_chole + auc_ossic + auc_facial) / 3
-    else:
-        metrics['auc_mean'] = (auc_chole + auc_ossic) / 2
     
     predictions = {
         'ear_ids': all_ear_ids,
@@ -236,19 +219,15 @@ def save_checkpoint(
     optimizer: torch.optim.Optimizer,
     epoch: int,
     metrics: Dict[str, float],
-    path: Path,
-    scheduler = None
+    path: Path
 ):
     """Save model checkpoint."""
-    state = {
+    torch.save({
         'epoch': epoch,
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'metrics': metrics
-    }
-    if scheduler is not None:
-        state['scheduler_state_dict'] = scheduler.state_dict()
-    torch.save(state, path)
+    }, path)
 
 
 def train_fold(
@@ -258,22 +237,21 @@ def train_fold(
 ) -> Dict:
     """Train a single fold."""
     
-    num_tasks = config.get('num_tasks', 3)
-    
     # Setup paths
     fold_path = Path(config['split_dir']) / f"fold_{fold}.json"
     output_dir = Path(config['output_dir']) / f"fold_{fold}"
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Setup logging
+    # Setup logging to file
     log_path = output_dir / 'training.log'
     file_handler = logging.FileHandler(log_path)
     file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
     logger.addHandler(file_handler)
     
     logger.info(f"=" * 60)
-    logger.info(f"Training Fold {fold} (Production)")
+    logger.info(f"Training Fold {fold}")
     logger.info(f"=" * 60)
+    logger.info(f"Config: {json.dumps(config, indent=2)}")
     
     # Load data
     train_ear_ids, val_ear_ids, labels_df = load_fold_data(
@@ -293,7 +271,7 @@ def train_fold(
         roi_dir=config['roi_dir'],
         labels_df=labels_df,
         transforms=train_transforms,
-        num_tasks=num_tasks
+        num_tasks=2
     )
     
     val_dataset = TemporalBoneDataset(
@@ -301,15 +279,18 @@ def train_fold(
         roi_dir=config['roi_dir'],
         labels_df=labels_df,
         transforms=val_transforms,
-        num_tasks=num_tasks
+        num_tasks=2
     )
     
+    logger.info(f"Train dataset size: {len(train_dataset)}, Val dataset size: {len(val_dataset)}")
+    
+    # Create dataloaders
     train_loader = DataLoader(
         train_dataset,
         batch_size=config['batch_size'],
         shuffle=True,
         num_workers=config['num_workers'],
-        pin_memory=True
+        pin_memory=False  # Disabled to reduce memory pressure
     )
     
     val_loader = DataLoader(
@@ -317,23 +298,19 @@ def train_fold(
         batch_size=config['batch_size'],
         shuffle=False,
         num_workers=config['num_workers'],
-        pin_memory=True
+        pin_memory=False  # Disabled to reduce memory pressure
     )
     
     # Compute class weights
-    label_cols = ['cholesteatoma', 'ossicular_discontinuity']
-    if num_tasks >= 3:
-        label_cols.append('facial_dehiscence')
-    
     pos_weights = compute_class_weights(
         labels_df[labels_df['exclusion_status'] == 'include'],
-        label_cols
+        ['cholesteatoma', 'ossicular_discontinuity']
     )
     logger.info(f"Positive class weights: {pos_weights}")
     
     # Create model
     model = TemporalBoneClassifier(
-        num_tasks=num_tasks,
+        num_tasks=2,
         use_cbam=config['use_cbam'],
         pretrained_path=config.get('pretrained_path')
     )
@@ -344,7 +321,7 @@ def train_fold(
     # Create loss function
     criterion = MaskedMultiTaskLoss(
         pos_weights=pos_weights,
-        num_tasks=num_tasks
+        num_tasks=2
     )
     
     # Create optimizer
@@ -360,10 +337,6 @@ def train_fold(
         T_max=config['epochs']
     )
     
-    # Mixed precision scaler
-    use_amp = config.get('mixed_precision', False) and device.type == 'cuda'
-    scaler = torch.amp.GradScaler('cuda') if use_amp else None
-    
     # Training history
     history = {
         'train_loss': [],
@@ -373,8 +346,6 @@ def train_fold(
         'val_auc_mean': [],
         'learning_rate': []
     }
-    if num_tasks >= 3:
-        history['val_auc_facial'] = []
     
     best_auc = 0.0
     best_epoch = 0
@@ -384,23 +355,26 @@ def train_fold(
     for epoch in range(1, config['epochs'] + 1):
         logger.info(f"\nEpoch {epoch}/{config['epochs']}")
         
+        # Train
         train_metrics = train_one_epoch(
             model, train_loader, criterion, optimizer, device, epoch,
-            grad_accumulation_steps=config['grad_accumulation_steps'],
-            scaler=scaler,
-            use_amp=use_amp
+            grad_accumulation_steps=config['grad_accumulation_steps']
         )
         
-        val_metrics, predictions = validate(
-            model, val_loader, criterion, device, epoch, num_tasks
-        )
+        # Validate
+        val_metrics, predictions = validate(model, val_loader, criterion, device, epoch)
         
+        # Update scheduler
         scheduler.step()
         current_lr = scheduler.get_last_lr()[0]
         
+        # Log metrics
         logger.info(f"  Train Loss: {train_metrics['loss']:.4f}")
         logger.info(f"  Val Loss: {val_metrics['loss']:.4f}")
+        logger.info(f"  Val AUC Chole: {val_metrics['auc_chole']:.4f}")
+        logger.info(f"  Val AUC Ossic: {val_metrics['auc_ossic']:.4f}")
         logger.info(f"  Val AUC Mean: {val_metrics['auc_mean']:.4f}")
+        logger.info(f"  LR: {current_lr:.6f}")
         
         # Update history
         history['train_loss'].append(train_metrics['loss'])
@@ -409,50 +383,51 @@ def train_fold(
         history['val_auc_ossic'].append(val_metrics['auc_ossic'])
         history['val_auc_mean'].append(val_metrics['auc_mean'])
         history['learning_rate'].append(current_lr)
-        if num_tasks >= 3:
-            history['val_auc_facial'].append(val_metrics.get('auc_facial', 0.5))
         
+        # Check for best model
         if val_metrics['auc_mean'] > best_auc:
             best_auc = val_metrics['auc_mean']
             best_epoch = epoch
             patience_counter = 0
             
+            # Save best checkpoint
             save_checkpoint(
                 model, optimizer, epoch, val_metrics,
-                output_dir / 'best_checkpoint.pth',
-                scheduler
+                output_dir / 'best_checkpoint.pth'
             )
-            logger.info(f"  New best model! AUC: {best_auc:.4f}")
+            logger.info(f"  New best model saved! AUC: {best_auc:.4f}")
             
-            # Save predictions
-            pred_cols = ['ear_id', 'prob_chole', 'prob_ossic']
-            pred_data = {
+            # Save validation predictions
+            pred_df = pd.DataFrame({
                 'ear_id': predictions['ear_ids'],
                 'prob_chole': predictions['preds'][:, 0],
-                'prob_ossic': predictions['preds'][:, 1]
-            }
-            if num_tasks >= 3:
-                pred_cols.append('prob_facial')
-                pred_data['prob_facial'] = predictions['preds'][:, 2]
-            
-            pd.DataFrame(pred_data).to_csv(
-                output_dir / 'validation_predictions.csv', index=False
-            )
+                'prob_ossic': predictions['preds'][:, 1],
+                'label_chole': predictions['labels'][:, 0],
+                'label_ossic': predictions['labels'][:, 1],
+                'mask_chole': predictions['masks'][:, 0],
+                'mask_ossic': predictions['masks'][:, 1]
+            })
+            pred_df.to_csv(output_dir / 'validation_predictions.csv', index=False)
         else:
             patience_counter += 1
-        
+            
+        # Early stopping
         if patience_counter >= config['early_stopping_patience']:
-            logger.info(f"Early stopping at epoch {epoch}")
+            logger.info(f"Early stopping triggered at epoch {epoch}")
             break
     
-    # Save history and config
+    # Save training history
     with open(output_dir / 'training_history.json', 'w') as f:
         json.dump(history, f, indent=2)
     
+    # Save config
     with open(output_dir / 'config.json', 'w') as f:
         json.dump(config, f, indent=2)
     
-    logger.info(f"\nBest epoch: {best_epoch}, Best AUC: {best_auc:.4f}")
+    logger.info(f"\nTraining complete!")
+    logger.info(f"Best epoch: {best_epoch}, Best AUC: {best_auc:.4f}")
+    
+    # Remove file handler
     logger.removeHandler(file_handler)
     
     return {
@@ -465,33 +440,47 @@ def train_fold(
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Phase 4: Model Training (Production)',
+        description='Phase 4: Model Training (Validation)',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     
-    parser.add_argument('--split_dir', type=str, default='dataset_splits')
-    parser.add_argument('--roi_dir', type=str, default='roi_extracted')
-    parser.add_argument('--labels_csv', type=str, default='labels.csv')
-    parser.add_argument('--output_dir', type=str, default='models')
+    # Data paths
+    parser.add_argument('--split_dir', type=str, default='dataset_splits_validation',
+                        help='Directory containing split JSON files')
+    parser.add_argument('--roi_dir', type=str, default='roi_extracted',
+                        help='Directory containing extracted ROIs')
+    parser.add_argument('--labels_csv', type=str, default='labels.csv',
+                        help='Path to labels CSV file')
+    parser.add_argument('--output_dir', type=str, default='models_validation',
+                        help='Output directory for models and logs')
     
-    parser.add_argument('--fold', type=int, default=None)
-    parser.add_argument('--epochs', type=int, default=150)
-    parser.add_argument('--batch_size', type=int, default=8)
-    parser.add_argument('--learning_rate', type=float, default=1e-4)
-    parser.add_argument('--weight_decay', type=float, default=1e-3)
-    parser.add_argument('--early_stopping_patience', type=int, default=15)
-    parser.add_argument('--grad_accumulation_steps', type=int, default=2)
-    parser.add_argument('--num_tasks', type=int, default=3)
+    # Training parameters
+    parser.add_argument('--fold', type=int, default=None,
+                        help='Fold to train (default: all folds)')
+    parser.add_argument('--epochs', type=int, default=50,
+                        help='Number of training epochs')
+    parser.add_argument('--batch_size', type=int, default=4,
+                        help='Batch size')
+    parser.add_argument('--learning_rate', type=float, default=1e-4,
+                        help='Learning rate')
+    parser.add_argument('--weight_decay', type=float, default=1e-3,
+                        help='Weight decay')
+    parser.add_argument('--early_stopping_patience', type=int, default=10,
+                        help='Early stopping patience')
+    parser.add_argument('--grad_accumulation_steps', type=int, default=2,
+                        help='Gradient accumulation steps')
     
-    parser.add_argument('--use_cbam', action='store_true', default=True)
+    # Model parameters
+    parser.add_argument('--use_cbam', action='store_true', default=True,
+                        help='Use CBAM attention')
     parser.add_argument('--pretrained_path', type=str, default='pretrained/resnet_18_23dataset.pth',
                         help='Path to MedicalNet pretrained weights (use None to train from scratch)')
-    parser.add_argument('--mixed_precision', action='store_true', default=True)
     
+    # Hardware
     parser.add_argument('--gpu', type=int, default=None,
                         help='GPU device ID (default: auto-detect, use -1 for CPU)')
     parser.add_argument('--num_workers', type=int, default=0,
-                        help='Number of DataLoader workers (use 0 to avoid memory issues on limited RAM systems)')
+                        help='Number of data loading workers')
     
     args = parser.parse_args()
     
@@ -507,35 +496,51 @@ def main():
         device = torch.device('cpu')
         logger.info("Using CPU (no GPU available)")
     
-    config = vars(args)
-    # Normalize pretrained_path: string "None" or empty => no pretrained
-    p = config.get('pretrained_path')
-    if isinstance(p, str) and p.strip().lower() in ('', 'none'):
-        config['pretrained_path'] = None
-    config['device'] = str(device)
-    config['timestamp'] = datetime.now().isoformat()
+    # Build config (normalize pretrained_path: string "None" or empty => no pretrained)
+    pretrained_path = args.pretrained_path
+    if isinstance(pretrained_path, str) and pretrained_path.strip().lower() in ('', 'none'):
+        pretrained_path = None
+    config = {
+        'split_dir': args.split_dir,
+        'roi_dir': args.roi_dir,
+        'labels_csv': args.labels_csv,
+        'output_dir': args.output_dir,
+        'epochs': args.epochs,
+        'batch_size': args.batch_size,
+        'learning_rate': args.learning_rate,
+        'weight_decay': args.weight_decay,
+        'early_stopping_patience': args.early_stopping_patience,
+        'grad_accumulation_steps': args.grad_accumulation_steps,
+        'use_cbam': args.use_cbam,
+        'pretrained_path': pretrained_path,
+        'num_workers': args.num_workers,
+        'device': str(device),
+        'timestamp': datetime.now().isoformat()
+    }
 
     # Ensure MedicalNet pretrained weights exist (auto-download if missing)
-    pretrained_path = config.get('pretrained_path')
-    if pretrained_path is not None:
-        p_path = Path(pretrained_path)
+    if config['pretrained_path'] is not None:
+        p_path = Path(config['pretrained_path'])
         if not p_path.exists():
             output_dir = str(p_path.parent) if p_path.parent != Path('.') else 'pretrained'
             filename = p_path.name if p_path.name else 'resnet_18_23dataset.pth'
-            logger.info(f"MedicalNet weights not found at {pretrained_path}; downloading...")
+            logger.info(f"MedicalNet weights not found at {config['pretrained_path']}; downloading...")
             resolved = download_medicalnet_weights(output_dir=output_dir, filename=filename)
             config['pretrained_path'] = resolved
             logger.info(f"Using MedicalNet weights at {resolved}")
 
+    # Determine which folds to train
     if args.fold is not None:
         folds = [args.fold]
     else:
+        # Find all folds
         split_dir = Path(args.split_dir)
         fold_files = sorted(split_dir.glob('fold_*.json'))
         folds = [int(f.stem.split('_')[1]) for f in fold_files]
     
     logger.info(f"Training folds: {folds}")
     
+    # Train each fold
     results = []
     for fold in folds:
         result = train_fold(fold, config, device)
@@ -543,7 +548,7 @@ def main():
     
     # Summary
     logger.info("\n" + "=" * 60)
-    logger.info("TRAINING SUMMARY (PRODUCTION)")
+    logger.info("TRAINING SUMMARY")
     logger.info("=" * 60)
     
     aucs = [r['best_auc'] for r in results]
@@ -553,6 +558,7 @@ def main():
     if len(aucs) > 1:
         logger.info(f"\nMean AUC: {np.mean(aucs):.4f} ± {np.std(aucs):.4f}")
     
+    # Save overall results
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
@@ -565,7 +571,7 @@ def main():
             'config': config
         }, f, indent=2)
     
-    logger.info("\nPhase 4 (Production) training completed!")
+    logger.info("\nPhase 4 (Validation) training completed!")
 
 
 if __name__ == '__main__':
