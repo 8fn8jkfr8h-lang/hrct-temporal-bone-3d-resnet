@@ -118,7 +118,7 @@ pt_02/
 
 - Load DICOM series with proper slice ordering (sort by ImagePositionPatient[2])
 - Verify slice continuity and spacing consistency
-- Apply bone windowing (Width: 4000, Level: 700)
+- Apply bone windowing (W:4000, L:700) -> Clip range [-1300, 2700]
 - Extract pixel arrays and metadata
 - Quality checks for completeness and artifacts
 

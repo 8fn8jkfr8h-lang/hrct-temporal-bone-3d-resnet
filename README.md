@@ -104,7 +104,7 @@ python pipeline/phase5_model_evaluation.py --generate_gradcam
 Preprocesses raw DICOM files into standardized volumes.
 
 - Loads DICOM with correct Z-ordering
-- Applies bone windowing (W:4000, L:700)
+- Applies correct bone windowing (Range: -1300 to 2700 HU)
 - Splits left/right temporal bones
 - Outputs: `processed_data/pt_XX/[left|right]/`
 

@@ -472,7 +472,7 @@ def main():
     parser.add_argument('--split_dir', type=str, default='dataset_splits')
     parser.add_argument('--roi_dir', type=str, default='roi_extracted')
     parser.add_argument('--labels_csv', type=str, default='labels.csv')
-    parser.add_argument('--output_dir', type=str, default='models')
+    parser.add_argument('--output_dir', type=str, default='training_checkpoints')
     
     parser.add_argument('--fold', type=int, default=None)
     parser.add_argument('--epochs', type=int, default=150)

@@ -139,11 +139,28 @@ class DICOMProcessor:
         """
         Convert raw pixel values to Hounsfield Units
         HU = pixel_value * RescaleSlope + RescaleIntercept
+        
+        Processes in chunks to avoid memory allocation errors with large volumes
         """
         slope = metadata['rescale_slope']
         intercept = metadata['rescale_intercept']
         
-        hu_volume = volume.astype(np.float32) * slope + intercept
+        # Pre-allocate output array
+        num_slices = volume.shape[0]
+        hu_volume = np.zeros((num_slices, volume.shape[1], volume.shape[2]), dtype=np.float32)
+        
+        # Process in chunks to avoid memory allocation errors
+        chunk_size = 128  # Process 128 slices at a time
+        
+        for start_idx in range(0, num_slices, chunk_size):
+            end_idx = min(start_idx + chunk_size, num_slices)
+            chunk = volume[start_idx:end_idx]
+            hu_volume[start_idx:end_idx] = chunk.astype(np.float32) * slope + intercept
+            
+            if (start_idx // chunk_size) % 2 == 0:
+                print(f"    Processed {end_idx}/{num_slices} slices")
+            
+            gc.collect()
         
         # Validation check
         print(f"  HU range: {hu_volume.min():.1f} to {hu_volume.max():.1f}")
@@ -325,7 +342,6 @@ class DICOMProcessor:
             axial_volume = None
             hu_volume = None
             windowed_volume = None
-            coronal_volume = None
             left_axial = None
             right_axial = None
             left_coronal = None
@@ -357,11 +373,8 @@ class DICOMProcessor:
                 hu_volume = None
                 gc.collect()
                 
-                # Reconstruct coronal view from FULL volume first
-                print(f"\n  Reconstructing coronal view...")
-                coronal_volume = self.reconstruct_coronal_view(windowed_volume, metadata)
-                
-                # Split left/right for both axial and coronal
+                # Split left/right EARLY to reduce memory footprint
+                # This is critical for large volumes
                 print(f"\n  Splitting lateral hemispheres (axial)...")
                 left_axial, right_axial = self.split_lateral_hemispheres(windowed_volume)
                 
@@ -370,12 +383,14 @@ class DICOMProcessor:
                 windowed_volume = None
                 gc.collect()
                 
-                print(f"\n  Splitting lateral hemispheres (coronal)...")
-                left_coronal, right_coronal = self.split_lateral_hemispheres(coronal_volume)
+                # Reconstruct coronal view for each hemisphere separately
+                # This reduces memory usage by working on half-sized volumes
+                print(f"\n  Reconstructing coronal view (left hemisphere)...")
+                left_coronal = self.reconstruct_coronal_view(left_axial, metadata)
+                gc.collect()
                 
-                # Free memory - coronal_volume no longer needed
-                del coronal_volume
-                coronal_volume = None
+                print(f"\n  Reconstructing coronal view (right hemisphere)...")
+                right_coronal = self.reconstruct_coronal_view(right_axial, metadata)
                 gc.collect()
                 
                 # Save processed data
@@ -393,7 +408,7 @@ class DICOMProcessor:
                 print(f"\n  ERROR processing {patient_id} (Attempt {attempt + 1}/{MAX_RETRIES}): {e}")
                 
                 # Explicit cleanup
-                del axial_volume, hu_volume, windowed_volume, coronal_volume
+                del axial_volume, hu_volume, windowed_volume
                 del left_axial, right_axial, left_coronal, right_coronal
                 gc.collect()
                 

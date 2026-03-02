@@ -250,7 +250,7 @@ def evaluate_pathology(
         y_p_bin = (y_p >= threshold_f1).astype(int)
         if len(np.unique(y_t)) < 2:
             return 0.5
-        cm = np.bincount(y_t * 2 + y_p_bin, minlength=4)
+        cm = np.bincount((y_t * 2 + y_p_bin).astype(int), minlength=4)
         tn, fp, fn, tp = cm[0], cm[1], cm[2], cm[3]
         return tp / (tp + fn) if (tp + fn) > 0 else 0
     
@@ -258,7 +258,7 @@ def evaluate_pathology(
         y_p_bin = (y_p >= threshold_f1).astype(int)
         if len(np.unique(y_t)) < 2:
             return 0.5
-        cm = np.bincount(y_t * 2 + y_p_bin, minlength=4)
+        cm = np.bincount((y_t * 2 + y_p_bin).astype(int), minlength=4)
         tn, fp, fn, tp = cm[0], cm[1], cm[2], cm[3]
         return tn / (tn + fp) if (tn + fp) > 0 else 0
     
@@ -352,7 +352,7 @@ def main():
     parser = argparse.ArgumentParser(
         description='Phase 5: Model Evaluation (Production)'
     )
-    parser.add_argument('--models_dir', type=str, default='models',
+    parser.add_argument('--models_dir', type=str, default='training_checkpoints',
                        help='Directory with trained models')
     parser.add_argument('--split_dir', type=str, default='dataset_splits',
                        help='Directory with dataset splits')
@@ -366,8 +366,9 @@ def main():
                        help='Batch size for inference')
     parser.add_argument('--n_bootstrap', type=int, default=1000,
                        help='Number of bootstrap iterations for CIs')
-    parser.add_argument('--generate_gradcam', action='store_true',
-                       help='Generate Grad-CAM visualizations')
+    parser.add_argument('--no_gradcam', dest='generate_gradcam', action='store_false',
+                       help='Disable Grad-CAM visualizations')
+    parser.set_defaults(generate_gradcam=True)
     parser.add_argument('--gradcam_samples', type=int, default=10,
                        help='Number of samples for Grad-CAM')
     parser.add_argument('--device', type=str, default='auto',
@@ -535,17 +536,33 @@ def main():
     # Generate Grad-CAM if requested
     if args.generate_gradcam and models:
         logger.info("Generating Grad-CAM visualizations...")
-        try:
-            generate_gradcam_for_batch(
-                model=models[0],  # Use first model for Grad-CAM
-                dataloader=test_loader,
-                device=device,
-                output_dir=gradcam_output,
-                max_samples=args.gradcam_samples,
-                task_idx=0  # Cholesteatoma
-            )
-        except Exception as e:
-            logger.error(f"Grad-CAM generation failed: {e}")
+        
+        # Use first model for Grad-CAM
+        gradcam_model = models[0]
+        
+        for task_idx in range(args.num_tasks):
+            # Determine task name
+            if task_idx < len(task_names):
+                task_name = task_names[task_idx]
+            else:
+                task_name = f'task_{task_idx}'
+                
+            logger.info(f"Generating Grad-CAM for {task_name}...")
+            
+            task_output_dir = gradcam_output / task_name
+            task_output_dir.mkdir(parents=True, exist_ok=True)
+            
+            try:
+                generate_gradcam_for_batch(
+                    model=gradcam_model,
+                    dataloader=test_loader,
+                    device=device,
+                    output_dir=task_output_dir,
+                    max_samples=args.gradcam_samples,
+                    task_idx=task_idx
+                )
+            except Exception as e:
+                logger.error(f"Grad-CAM generation failed for {task_name}: {e}")
     
     # Print summary
     print("\n" + "="*70)

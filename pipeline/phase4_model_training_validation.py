@@ -451,7 +451,7 @@ def main():
                         help='Directory containing extracted ROIs')
     parser.add_argument('--labels_csv', type=str, default='labels.csv',
                         help='Path to labels CSV file')
-    parser.add_argument('--output_dir', type=str, default='models_validation',
+    parser.add_argument('--output_dir', type=str, default='training_checkpoints_validation',
                         help='Output directory for models and logs')
     
     # Training parameters

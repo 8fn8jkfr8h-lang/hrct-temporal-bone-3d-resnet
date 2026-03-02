@@ -301,7 +301,7 @@ def generate_gradcam_for_batch(
             if samples_processed >= max_samples:
                 break
             
-            volumes = batch['volume'].to(device)
+            volumes = batch['image'].to(device)
             labels = batch['labels']
             ear_ids = batch.get('ear_id', [f'sample_{i}' for i in range(len(volumes))])
             

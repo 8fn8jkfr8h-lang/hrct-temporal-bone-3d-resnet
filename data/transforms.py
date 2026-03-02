@@ -20,7 +20,8 @@ try:
         RandGaussianSmoothd,
         RandScaleIntensityd,
         RandCoarseDropoutd,
-        ScaleIntensityd
+        ScaleIntensityd,
+        ScaleIntensityRanged
     )
     MONAI_AVAILABLE = True
 except ImportError:
@@ -44,8 +45,15 @@ def get_train_transforms():
         # Ensure channel first format
         EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"),
         
-        # Normalize intensity to [0, 1]
-        ScaleIntensityd(keys=["image"], minv=0.0, maxv=1.0),
+        # Windowing (Bone Window) and Normalize to [0, 1]
+        ScaleIntensityRanged(
+            keys=["image"], 
+            a_min=-1300.0, 
+            a_max=2700.0, 
+            b_min=0.0, 
+            b_max=1.0, 
+            clip=True
+        ),
         
         # Geometric augmentation
         RandAffined(
@@ -106,8 +114,15 @@ def get_val_transforms():
         # Ensure channel first format
         EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"),
         
-        # Normalize intensity to [0, 1]
-        ScaleIntensityd(keys=["image"], minv=0.0, maxv=1.0),
+        # Windowing (Bone Window) and Normalize to [0, 1]
+        ScaleIntensityRanged(
+            keys=["image"], 
+            a_min=-1300.0, 
+            a_max=2700.0, 
+            b_min=0.0, 
+            b_max=1.0, 
+            clip=True
+        ),
         
         # Convert to tensor
         ToTensord(keys=["image"])
@@ -126,8 +141,10 @@ class BasicTrainTransform:
         if image.ndim == 3:
             image = image[np.newaxis, ...]
         
-        # Basic normalization
-        image = (image - image.min()) / (image.max() - image.min() + 1e-8)
+        # Manual Windowing (Bone Window: -1300 to 2700)
+        min_hu, max_hu = -1300.0, 2700.0
+        image = np.clip(image, min_hu, max_hu)
+        image = (image - min_hu) / (max_hu - min_hu)
         
         # Random flip (simple augmentation)
         if np.random.random() > 0.5:
@@ -149,8 +166,10 @@ class BasicValTransform:
         if image.ndim == 3:
             image = image[np.newaxis, ...]
         
-        # Basic normalization
-        image = (image - image.min()) / (image.max() - image.min() + 1e-8)
+        # Manual Windowing (Bone Window: -1300 to 2700)
+        min_hu, max_hu = -1300.0, 2700.0
+        image = np.clip(image, min_hu, max_hu)
+        image = (image - min_hu) / (max_hu - min_hu)
         
         data["image"] = torch.from_numpy(image.astype(np.float32))
         return data

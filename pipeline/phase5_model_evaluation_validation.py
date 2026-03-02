@@ -65,6 +65,7 @@ from evaluation.visualization import (
     plot_training_curves,
     plot_auc_summary
 )
+from evaluation.gradcam import GradCAM3D, save_gradcam_slices
 
 # Configure logging
 logging.basicConfig(
@@ -286,6 +287,113 @@ def evaluate_fold(
     return results
 
 
+def run_gradcam_analysis(
+    fold: int,
+    model: nn.Module,
+    val_ear_ids: List[str],
+    roi_dir: Path,
+    labels_df: pd.DataFrame,
+    device: torch.device,
+    output_dir: Path,
+    num_samples: int = 5
+) -> None:
+    """
+    Generate Grad-CAM visualizations for a subset of validation samples.
+    
+    Args:
+        fold: Fold number
+        model: Trained model
+        val_ear_ids: List of validation ear IDs
+        roi_dir: Path to ROI data
+        labels_df: Labels DataFrame
+        device: Device for inference
+        output_dir: Output directory
+        num_samples: Number of samples to visualize
+    """
+    logger.info(f"Generating Grad-CAM for fold {fold}...")
+    
+    # Create dataset (reuse existing logic)
+    dataset = TemporalBoneDataset(
+        ear_ids=val_ear_ids,
+        roi_dir=roi_dir,
+        labels_df=labels_df,
+        transforms=get_val_transforms(),
+        num_tasks=2
+    )
+    
+    dataloader = DataLoader(
+        dataset,
+        batch_size=1,  # Process one by one for GradCAM
+        shuffle=False,
+        num_workers=0
+    )
+    
+    gradcam_dir = output_dir / 'gradcam' / f'fold_{fold}'
+    gradcam_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Initialize GradCAM
+    try:
+        gradcam = GradCAM3D(model)
+    except Exception as e:
+        logger.error(f"Failed to initialize Grad-CAM: {e}")
+        return
+
+    count = 0
+    # Enable gradients for GradCAM
+    model.eval()
+    
+    for batch in dataloader:
+        if count >= num_samples:
+            break
+            
+        images = batch['image'].to(device)
+        labels = batch['labels']
+        ear_id = batch['ear_id'][0]
+        
+        # We need gradients on input for some implementations, but GradCAM usually hooks layers.
+        # However, input requires_grad is often good practice or required if visualizing input grads.
+        # Here we just pass it to gradcam.
+        images.requires_grad_(True)
+        
+        # For each task (Cholesteatoma, Ossicular)
+        tasks = ['cholesteatoma', 'ossicular']
+        for task_idx, task_name in enumerate(tasks):
+            # Check if we have a valid label for this task
+            if batch['mask'][0, task_idx] == 0:
+                continue
+            
+            task_dir = gradcam_dir / task_name
+            task_dir.mkdir(parents=True, exist_ok=True)
+            
+            try:
+                # Run GradCAM
+                heatmap = gradcam(images, target_class=task_idx)
+                
+                # Get prediction
+                with torch.no_grad():
+                    output = model(images)
+                    pred = torch.sigmoid(output[0, task_idx]).item()
+                
+                gt = int(labels[0, task_idx].item())
+                
+                # Save
+                vol_np = images[0, 0].detach().cpu().numpy()
+                save_gradcam_slices(
+                    volume=vol_np,
+                    heatmap=heatmap,
+                    output_dir=task_dir,
+                    case_id=ear_id,
+                    prediction=pred,
+                    ground_truth=gt
+                )
+            except Exception as e:
+                logger.error(f"Error generating Grad-CAM for {ear_id} task {task_name}: {e}")
+                
+        count += 1
+    
+    logger.info(f"Generated Grad-CAM for {count} samples in fold {fold}")
+
+
 def run_sanity_checks(
     fold_metrics: List[Dict],
     training_histories: Dict[int, Dict]
@@ -340,7 +448,7 @@ def main():
     parser = argparse.ArgumentParser(
         description='Phase 5: Model Evaluation (Validation)'
     )
-    parser.add_argument('--models_dir', type=str, default='models_validation',
+    parser.add_argument('--models_dir', type=str, default='training_checkpoints_validation',
                        help='Directory with trained models')
     parser.add_argument('--split_dir', type=str, default='dataset_splits_validation',
                        help='Directory with dataset splits')
@@ -356,6 +464,11 @@ def main():
                        help='Batch size for inference')
     parser.add_argument('--device', type=str, default='auto',
                        help='Device (auto, cpu, cuda)')
+    parser.add_argument('--no_gradcam', dest='gradcam', action='store_false',
+                       help='Disable Grad-CAM visualizations')
+    parser.set_defaults(gradcam=True)
+    parser.add_argument('--gradcam_samples', type=int, default=5,
+                       help='Number of samples to visualize with Grad-CAM per fold')
     
     args = parser.parse_args()
     
@@ -436,6 +549,19 @@ def main():
             device=device,
             batch_size=args.batch_size
         )
+
+        # Generate Grad-CAM if requested
+        if args.gradcam:
+            run_gradcam_analysis(
+                fold=fold,
+                model=model,
+                val_ear_ids=val_ear_ids,
+                roi_dir=roi_dir,
+                labels_df=labels_df,
+                device=device,
+                output_dir=output_dir,
+                num_samples=args.gradcam_samples
+            )
         
         # Store metrics (without predictions for aggregation)
         metrics_only = {k: v for k, v in results.items() if k != 'predictions'}

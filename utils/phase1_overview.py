@@ -100,7 +100,16 @@ def run_batch_viewer():
     print("BATCH VIEWER - Generating Overview Images")
     print("="*60)
     
-    patients = sorted([d for d in data_dir.iterdir() if d.is_dir()])
+    # NOTE: `output_dir` lives inside `data_dir`, so it will appear as a directory
+    # when iterating `data_dir`. Exclude it, otherwise we generate an extra
+    # "patient" named "overview".
+    patients = sorted(
+        [
+            d
+            for d in data_dir.iterdir()
+            if d.is_dir() and d.resolve() != output_dir.resolve()
+        ]
+    )
     
     print(f"\nProcessing {len(patients)} patients...")
     
