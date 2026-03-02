@@ -4,7 +4,7 @@ Temporal Bone HRCT Project
 
 Comprehensive evaluation script for full production dataset:
 - Test set evaluation with ensemble predictions from 5 folds
-- Per-pathology metrics for cholesteatoma, ossicular, facial nerve
+- Per-pathology metrics for cholesteatoma, ossicular, facial nerve, LSCC
 - Bootstrap 95% CIs for all metrics
 - Error analysis (FP/FN case identification)
 - Grad-CAM visualization generation
@@ -60,8 +60,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Task configuration
-TASK_NAMES = ['cholesteatoma', 'ossicular_discontinuity', 'facial_nerve_dehiscence']
-TASK_WEIGHTS = {'cholesteatoma': 0.5, 'ossicular': 0.3, 'facial_nerve': 0.2}
+TASK_NAMES = [
+    'cholesteatoma',
+    'ossicular_discontinuity',
+    'facial_nerve_dehiscence',
+    'lscc_dehiscence'
+]
+TASK_WEIGHTS = {'cholesteatoma': 0.45, 'ossicular': 0.25, 'facial_nerve': 0.2, 'lscc': 0.1}
 
 
 def validate_inputs(args: argparse.Namespace) -> None:
@@ -86,7 +91,7 @@ def validate_inputs(args: argparse.Namespace) -> None:
 def load_ensemble_models(
     models_dir: Path,
     device: torch.device,
-    num_tasks: int = 3,
+    num_tasks: int = 4,
     n_folds: int = 5
 ) -> List[TemporalBoneClassifier]:
     """
@@ -373,8 +378,8 @@ def main():
                        help='Number of samples for Grad-CAM')
     parser.add_argument('--device', type=str, default='auto',
                        help='Device (auto, cpu, cuda)')
-    parser.add_argument('--num_tasks', type=int, default=3,
-                       help='Number of classification tasks (2 for validation, 3 for production)')
+    parser.add_argument('--num_tasks', type=int, default=4,
+                       help='Number of classification tasks (2 for validation, 3 for facial nerve, 4 with LSCC)')
     
     args = parser.parse_args()
     

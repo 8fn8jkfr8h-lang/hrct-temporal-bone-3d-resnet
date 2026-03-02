@@ -13,6 +13,13 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
+TASK_LABEL_COLUMNS = [
+    'cholesteatoma',
+    'ossicular_discontinuity',
+    'facial_dehiscence',
+    'lscc_dehiscence'
+]
+
 
 class TemporalBoneDataset(Dataset):
     """
@@ -38,12 +45,18 @@ class TemporalBoneDataset(Dataset):
             roi_dir: Directory containing extracted ROIs
             labels_df: DataFrame with labels indexed by patient_id
             transforms: Optional transform pipeline
-            num_tasks: Number of classification tasks (2 or 3)
+            num_tasks: Number of classification tasks (2, 3, or 4)
         """
+        if num_tasks < 2 or num_tasks > len(TASK_LABEL_COLUMNS):
+            raise ValueError(
+                f"num_tasks must be between 2 and {len(TASK_LABEL_COLUMNS)}, got {num_tasks}"
+            )
+
         self.roi_dir = Path(roi_dir)
         self.labels_df = labels_df
         self.transforms = transforms
         self.num_tasks = num_tasks
+        self.task_columns = TASK_LABEL_COLUMNS[:num_tasks]
         
         # Parse ear IDs and build sample list
         self.samples = []
@@ -93,25 +106,12 @@ class TemporalBoneDataset(Dataset):
         
         row = rows.iloc[0]
         
-        # Extract labels
         labels = []
         mask = []
-        
-        # Cholesteatoma
-        chole = row.get('cholesteatoma', np.nan)
-        labels.append(0.0 if pd.isna(chole) else float(chole))
-        mask.append(0.0 if pd.isna(chole) else 1.0)
-        
-        # Ossicular discontinuity
-        ossic = row.get('ossicular_discontinuity', np.nan)
-        labels.append(0.0 if pd.isna(ossic) else float(ossic))
-        mask.append(0.0 if pd.isna(ossic) else 1.0)
-        
-        # Facial nerve (if 3 tasks)
-        if self.num_tasks >= 3:
-            facial = row.get('facial_dehiscence', np.nan)
-            labels.append(0.0 if pd.isna(facial) else float(facial))
-            mask.append(0.0 if pd.isna(facial) else 1.0)
+        for col in self.task_columns:
+            value = row.get(col, np.nan)
+            labels.append(0.0 if pd.isna(value) else float(value))
+            mask.append(0.0 if pd.isna(value) else 1.0)
         
         return np.array(labels, dtype=np.float32), np.array(mask, dtype=np.float32)
     

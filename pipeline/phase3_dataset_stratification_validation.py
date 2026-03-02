@@ -55,17 +55,19 @@ def load_and_validate_labels(labels_path: Path) -> pd.DataFrame:
                      'exclusion_status']
     
     df = pd.read_csv(labels_path)
+    df = df.dropna(how='all').copy()
     
     # Validate schema
     missing_cols = [col for col in required_cols if col not in df.columns]
     if missing_cols:
         raise ValueError(f"Missing required columns: {missing_cols}")
     
-    # Check for missing patient_id or ear
-    if df['patient_id'].isna().any():
-        raise ValueError("Found rows with missing patient_id")
-    if df['ear'].isna().any():
-        raise ValueError("Found rows with missing ear")
+    # Drop malformed rows (common when CSV has trailing blank lines/columns)
+    missing_id_or_ear = df['patient_id'].isna() | df['ear'].isna()
+    if missing_id_or_ear.any():
+        n_dropped = int(missing_id_or_ear.sum())
+        logger.warning(f"Dropping {n_dropped} rows with missing patient_id/ear")
+        df = df.loc[~missing_id_or_ear].copy()
     
     # Apply exclusion filter
     included_df = df[df['exclusion_status'] == 'include'].copy()

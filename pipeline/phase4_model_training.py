@@ -3,7 +3,7 @@ Phase 4: Model Training (Production Script)
 Temporal Bone HRCT Project
 
 Full-featured production script for complete dataset (100-120 patients):
-- 3-head architecture (cholesteatoma + ossicular + facial_nerve)
+- 4-head architecture (cholesteatoma + ossicular + facial_nerve + lscc)
 - 150 epochs with early stopping
 - Mixed precision training support
 - Comprehensive logging and checkpointing
@@ -88,6 +88,7 @@ def train_one_epoch(
     loss_chole = 0.0
     loss_ossic = 0.0
     loss_facial = 0.0
+    loss_lscc = 0.0
     n_batches = 0
     
     optimizer.zero_grad()
@@ -129,6 +130,7 @@ def train_one_epoch(
         loss_chole += loss_dict['loss_chole']
         loss_ossic += loss_dict['loss_ossic']
         loss_facial += loss_dict.get('loss_facial', 0.0)
+        loss_lscc += loss_dict.get('loss_lscc', 0.0)
         n_batches += 1
         
         pbar.set_postfix({'loss': f"{loss_dict['loss_total']:.4f}"})
@@ -146,7 +148,8 @@ def train_one_epoch(
         'loss': total_loss / max(n_batches, 1),
         'loss_chole': loss_chole / max(n_batches, 1),
         'loss_ossic': loss_ossic / max(n_batches, 1),
-        'loss_facial': loss_facial / max(n_batches, 1)
+        'loss_facial': loss_facial / max(n_batches, 1),
+        'loss_lscc': loss_lscc / max(n_batches, 1)
     }
 
 
@@ -157,7 +160,7 @@ def validate(
     criterion: nn.Module,
     device: torch.device,
     epoch: int,
-    num_tasks: int = 3
+    num_tasks: int = 4
 ) -> Tuple[Dict[str, float], Dict[str, np.ndarray]]:
     """Validate the model."""
     model.eval()
@@ -166,6 +169,7 @@ def validate(
     loss_chole = 0.0
     loss_ossic = 0.0
     loss_facial = 0.0
+    loss_lscc = 0.0
     n_batches = 0
     
     all_preds = []
@@ -187,6 +191,7 @@ def validate(
         loss_chole += loss_dict['loss_chole']
         loss_ossic += loss_dict['loss_ossic']
         loss_facial += loss_dict.get('loss_facial', 0.0)
+        loss_lscc += loss_dict.get('loss_lscc', 0.0)
         n_batches += 1
         
         probs = torch.sigmoid(outputs).cpu().numpy()
@@ -213,13 +218,21 @@ def validate(
         'auc_ossic': auc_ossic
     }
     
+    auc_components = [auc_chole, auc_ossic]
+
     if num_tasks >= 3:
         auc_facial = compute_auc(all_labels[:, 2], all_preds[:, 2], all_masks[:, 2])
         metrics['loss_facial'] = loss_facial / max(n_batches, 1)
         metrics['auc_facial'] = auc_facial
-        metrics['auc_mean'] = (auc_chole + auc_ossic + auc_facial) / 3
-    else:
-        metrics['auc_mean'] = (auc_chole + auc_ossic) / 2
+        auc_components.append(auc_facial)
+
+    if num_tasks >= 4:
+        auc_lscc = compute_auc(all_labels[:, 3], all_preds[:, 3], all_masks[:, 3])
+        metrics['loss_lscc'] = loss_lscc / max(n_batches, 1)
+        metrics['auc_lscc'] = auc_lscc
+        auc_components.append(auc_lscc)
+
+    metrics['auc_mean'] = float(np.mean(auc_components))
     
     predictions = {
         'ear_ids': all_ear_ids,
@@ -258,7 +271,7 @@ def train_fold(
 ) -> Dict:
     """Train a single fold."""
     
-    num_tasks = config.get('num_tasks', 3)
+    num_tasks = config.get('num_tasks', 4)
     
     # Setup paths
     fold_path = Path(config['split_dir']) / f"fold_{fold}.json"
@@ -324,6 +337,8 @@ def train_fold(
     label_cols = ['cholesteatoma', 'ossicular_discontinuity']
     if num_tasks >= 3:
         label_cols.append('facial_dehiscence')
+    if num_tasks >= 4:
+        label_cols.append('lscc_dehiscence')
     
     pos_weights = compute_class_weights(
         labels_df[labels_df['exclusion_status'] == 'include'],
@@ -375,6 +390,8 @@ def train_fold(
     }
     if num_tasks >= 3:
         history['val_auc_facial'] = []
+    if num_tasks >= 4:
+        history['val_auc_lscc'] = []
     
     best_auc = 0.0
     best_epoch = 0
@@ -411,6 +428,8 @@ def train_fold(
         history['learning_rate'].append(current_lr)
         if num_tasks >= 3:
             history['val_auc_facial'].append(val_metrics.get('auc_facial', 0.5))
+        if num_tasks >= 4:
+            history['val_auc_lscc'].append(val_metrics.get('auc_lscc', 0.5))
         
         if val_metrics['auc_mean'] > best_auc:
             best_auc = val_metrics['auc_mean']
@@ -434,6 +453,9 @@ def train_fold(
             if num_tasks >= 3:
                 pred_cols.append('prob_facial')
                 pred_data['prob_facial'] = predictions['preds'][:, 2]
+            if num_tasks >= 4:
+                pred_cols.append('prob_lscc')
+                pred_data['prob_lscc'] = predictions['preds'][:, 3]
             
             pd.DataFrame(pred_data).to_csv(
                 output_dir / 'validation_predictions.csv', index=False
@@ -481,7 +503,7 @@ def main():
     parser.add_argument('--weight_decay', type=float, default=1e-3)
     parser.add_argument('--early_stopping_patience', type=int, default=15)
     parser.add_argument('--grad_accumulation_steps', type=int, default=2)
-    parser.add_argument('--num_tasks', type=int, default=3)
+    parser.add_argument('--num_tasks', type=int, default=4)
     
     parser.add_argument('--use_cbam', action='store_true', default=True)
     parser.add_argument('--pretrained_path', type=str, default='pretrained/resnet_18_23dataset.pth',

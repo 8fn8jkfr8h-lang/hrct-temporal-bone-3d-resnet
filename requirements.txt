@@ -7,7 +7,7 @@ pandas
 scikit-image
 opencv-python
 matplotlib
-tensorflow==2.10.0
+tensorflow==2.13.0
 scipy
 multipledispatch
 pynrrd

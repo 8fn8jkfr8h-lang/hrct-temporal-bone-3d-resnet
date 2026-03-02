@@ -20,8 +20,7 @@ try:
         RandGaussianSmoothd,
         RandScaleIntensityd,
         RandCoarseDropoutd,
-        ScaleIntensityd,
-        ScaleIntensityRanged
+        ScaleIntensityd
     )
     MONAI_AVAILABLE = True
 except ImportError:
@@ -45,15 +44,8 @@ def get_train_transforms():
         # Ensure channel first format
         EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"),
         
-        # Windowing (Bone Window) and Normalize to [0, 1]
-        ScaleIntensityRanged(
-            keys=["image"], 
-            a_min=-1300.0, 
-            a_max=2700.0, 
-            b_min=0.0, 
-            b_max=1.0, 
-            clip=True
-        ),
+        # Inputs from Phase 1 are already bone-windowed and normalized to [0, 1].
+        ScaleIntensityd(keys=["image"], minv=0.0, maxv=1.0),
         
         # Geometric augmentation
         RandAffined(
@@ -114,15 +106,8 @@ def get_val_transforms():
         # Ensure channel first format
         EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"),
         
-        # Windowing (Bone Window) and Normalize to [0, 1]
-        ScaleIntensityRanged(
-            keys=["image"], 
-            a_min=-1300.0, 
-            a_max=2700.0, 
-            b_min=0.0, 
-            b_max=1.0, 
-            clip=True
-        ),
+        # Inputs from Phase 1 are already bone-windowed and normalized to [0, 1].
+        ScaleIntensityd(keys=["image"], minv=0.0, maxv=1.0),
         
         # Convert to tensor
         ToTensord(keys=["image"])
@@ -141,10 +126,8 @@ class BasicTrainTransform:
         if image.ndim == 3:
             image = image[np.newaxis, ...]
         
-        # Manual Windowing (Bone Window: -1300 to 2700)
-        min_hu, max_hu = -1300.0, 2700.0
-        image = np.clip(image, min_hu, max_hu)
-        image = (image - min_hu) / (max_hu - min_hu)
+        # Data is already normalized in Phase 1; keep range stable.
+        image = np.clip(image, 0.0, 1.0)
         
         # Random flip (simple augmentation)
         if np.random.random() > 0.5:
@@ -166,10 +149,8 @@ class BasicValTransform:
         if image.ndim == 3:
             image = image[np.newaxis, ...]
         
-        # Manual Windowing (Bone Window: -1300 to 2700)
-        min_hu, max_hu = -1300.0, 2700.0
-        image = np.clip(image, min_hu, max_hu)
-        image = (image - min_hu) / (max_hu - min_hu)
+        # Data is already normalized in Phase 1; keep range stable.
+        image = np.clip(image, 0.0, 1.0)
         
         data["image"] = torch.from_numpy(image.astype(np.float32))
         return data

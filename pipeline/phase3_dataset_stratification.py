@@ -4,7 +4,7 @@ Temporal Bone HRCT Project
 
 Full-featured version for production dataset (100-120 patients):
 - Fixed test set allocation (15-20%)
-- 3-label stratification (cholesteatoma + ossicular + facial_nerve_presence)
+- 4-label stratification (cholesteatoma + ossicular + facial_presence + lscc_presence)
 - Patient-level grouping to prevent data leakage from bilateral ears
 - 5-fold cross-validation on remaining data
 
@@ -53,22 +53,24 @@ def load_and_validate_labels(labels_path: Path) -> pd.DataFrame:
     """
     logger.info(f"Loading labels from {labels_path}")
     
-    # Required columns for production (includes facial_dehiscence)
+    # Required columns for production (includes facial and LSCC dehiscence)
     required_cols = ['patient_id', 'ear', 'cholesteatoma', 'ossicular_discontinuity', 
-                     'facial_dehiscence', 'exclusion_status']
+                     'facial_dehiscence', 'lscc_dehiscence', 'exclusion_status']
     
     df = pd.read_csv(labels_path)
+    df = df.dropna(how='all').copy()
     
     # Validate schema
     missing_cols = [col for col in required_cols if col not in df.columns]
     if missing_cols:
         raise ValueError(f"Missing required columns: {missing_cols}")
     
-    # Check for missing patient_id or ear
-    if df['patient_id'].isna().any():
-        raise ValueError("Found rows with missing patient_id")
-    if df['ear'].isna().any():
-        raise ValueError("Found rows with missing ear")
+    # Drop malformed rows (common when CSV has trailing blank lines/columns)
+    missing_id_or_ear = df['patient_id'].isna() | df['ear'].isna()
+    if missing_id_or_ear.any():
+        n_dropped = int(missing_id_or_ear.sum())
+        logger.warning(f"Dropping {n_dropped} rows with missing patient_id/ear")
+        df = df.loc[~missing_id_or_ear].copy()
     
     # Apply exclusion filter
     included_df = df[df['exclusion_status'] == 'include'].copy()
@@ -88,6 +90,8 @@ def load_and_validate_labels(labels_path: Path) -> pd.DataFrame:
     
     # Create facial_nerve_presence indicator (1 if value exists, 0 if NULL)
     included_df['facial_nerve_presence'] = (~included_df['facial_dehiscence'].isna()).astype(int)
+    # Create LSCC presence indicator (1 if value exists, 0 if NULL)
+    included_df['lscc_presence'] = (~included_df['lscc_dehiscence'].isna()).astype(int)
     
     return included_df
 
@@ -137,7 +141,7 @@ def create_patient_level_labels(labels_df: pd.DataFrame) -> Tuple[pd.DataFrame, 
     Returns:
         Tuple of:
         - Patient-level DataFrame with aggregated labels
-        - Label matrix (n_patients, 3) for stratification [chole, ossic, facial_presence]
+        - Label matrix (n_patients, 4) for stratification [chole, ossic, facial_presence, lscc_presence]
     """
     logger.info("Creating patient-level labels with OR logic for bilateral cases")
     
@@ -147,6 +151,8 @@ def create_patient_level_labels(labels_df: pd.DataFrame) -> Tuple[pd.DataFrame, 
         'ossicular_discontinuity': 'max',
         'facial_dehiscence': 'max',
         'facial_nerve_presence': 'max',
+        'lscc_dehiscence': 'max',
+        'lscc_presence': 'max',
         'ear_id': list,
         'ear_normalized': list
     }).reset_index()
@@ -157,15 +163,19 @@ def create_patient_level_labels(labels_df: pd.DataFrame) -> Tuple[pd.DataFrame, 
     patient_labels['cholesteatoma'] = patient_labels['cholesteatoma'].fillna(0).astype(int)
     patient_labels['ossicular_discontinuity'] = patient_labels['ossicular_discontinuity'].fillna(0).astype(int)
     patient_labels['facial_nerve_presence'] = patient_labels['facial_nerve_presence'].fillna(0).astype(int)
-    
-    # Create label matrix for stratification [cholesteatoma, ossicular, facial_presence]
-    label_matrix = patient_labels[['cholesteatoma', 'ossicular_discontinuity', 'facial_nerve_presence']].values
+    patient_labels['lscc_presence'] = patient_labels['lscc_presence'].fillna(0).astype(int)
+
+    # Create label matrix for stratification [cholesteatoma, ossicular, facial_presence, lscc_presence]
+    label_matrix = patient_labels[
+        ['cholesteatoma', 'ossicular_discontinuity', 'facial_nerve_presence', 'lscc_presence']
+    ].values
     
     logger.info(f"Patient-level statistics:")
     logger.info(f"  Total patients: {len(patient_labels)}")
     logger.info(f"  Cholesteatoma positive: {label_matrix[:, 0].sum()}")
     logger.info(f"  Ossicular discontinuity positive: {label_matrix[:, 1].sum()}")
     logger.info(f"  Facial nerve data present: {label_matrix[:, 2].sum()}")
+    logger.info(f"  LSCC data present: {label_matrix[:, 3].sum()}")
     
     return patient_labels, label_matrix
 
@@ -236,7 +246,8 @@ def create_test_set_json(
         'class_distribution': {
             'cholesteatoma': count_distribution(test_ears_df['cholesteatoma']),
             'ossicular_discontinuity': count_distribution(test_ears_df['ossicular_discontinuity']),
-            'facial_nerve_dehiscence': count_distribution(test_ears_df['facial_dehiscence'])
+            'facial_nerve_dehiscence': count_distribution(test_ears_df['facial_dehiscence']),
+            'lscc_dehiscence': count_distribution(test_ears_df['lscc_dehiscence'])
         }
     }
 
@@ -304,7 +315,9 @@ def create_cv_splits(
                 'ossicular_discontinuity': {'positive': int(train_labels[:, 1].sum()),
                                             'negative': int((1 - train_labels[:, 1]).sum())},
                 'facial_nerve_presence': {'positive': int(train_labels[:, 2].sum()),
-                                          'negative': int((1 - train_labels[:, 2]).sum())}
+                                          'negative': int((1 - train_labels[:, 2]).sum())},
+                'lscc_presence': {'positive': int(train_labels[:, 3].sum()),
+                                  'negative': int((1 - train_labels[:, 3]).sum())}
             },
             'val_distribution': {
                 'cholesteatoma': {'positive': int(val_labels[:, 0].sum()),
@@ -312,7 +325,9 @@ def create_cv_splits(
                 'ossicular_discontinuity': {'positive': int(val_labels[:, 1].sum()),
                                             'negative': int((1 - val_labels[:, 1]).sum())},
                 'facial_nerve_presence': {'positive': int(val_labels[:, 2].sum()),
-                                          'negative': int((1 - val_labels[:, 2]).sum())}
+                                          'negative': int((1 - val_labels[:, 2]).sum())},
+                'lscc_presence': {'positive': int(val_labels[:, 3].sum()),
+                                  'negative': int((1 - val_labels[:, 3]).sum())}
             }
         }
         
@@ -418,6 +433,7 @@ def print_summary(
     print(f"  Cholesteatoma:           {label_matrix[:, 0].sum():3d} positive / {len(label_matrix):3d} total ({100*label_matrix[:, 0].mean():.1f}%)")
     print(f"  Ossicular Discontinuity: {label_matrix[:, 1].sum():3d} positive / {len(label_matrix):3d} total ({100*label_matrix[:, 1].mean():.1f}%)")
     print(f"  Facial Nerve Data:       {label_matrix[:, 2].sum():3d} present / {len(label_matrix):3d} total ({100*label_matrix[:, 2].mean():.1f}%)")
+    print(f"  LSCC Data:               {label_matrix[:, 3].sum():3d} present / {len(label_matrix):3d} total ({100*label_matrix[:, 3].mean():.1f}%)")
     
     print(f"\nTest Set Class Distribution:")
     for label, dist in test_set['class_distribution'].items():
@@ -475,7 +491,7 @@ def save_outputs(
         'n_total_ears': total_ears,
         'test_percentage': round(100 * test_set['n_patients'] / len(patient_labels), 1),
         'cv_folds': config['cv_folds'],
-        'stratification_labels': ['cholesteatoma', 'ossicular_discontinuity', 'facial_nerve_presence'],
+        'stratification_labels': ['cholesteatoma', 'ossicular_discontinuity', 'facial_nerve_presence', 'lscc_presence'],
         'script_version': 'production',
         'exclusion_criteria': {
             'excluded_patients': config.get('excluded_count', 0)

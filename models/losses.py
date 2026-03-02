@@ -30,24 +30,29 @@ class MaskedMultiTaskLoss(nn.Module):
         """
         Args:
             pos_weights: Positive class weights per task (neg_count / pos_count)
-                        Keys: 'chole', 'ossic', 'facial'
+                        Keys: 'chole', 'ossic', 'facial', 'lscc'
             task_weights: Task importance weights (should sum to 1)
-                         Keys: 'chole', 'ossic', 'facial'
-            num_tasks: Number of classification tasks (2 or 3)
+                         Keys: 'chole', 'ossic', 'facial', 'lscc'
+            num_tasks: Number of classification tasks (2, 3, or 4)
         """
         super().__init__()
-        
+
+        if num_tasks < 2 or num_tasks > 4:
+            raise ValueError(f"num_tasks must be 2, 3, or 4. Got {num_tasks}")
+
         self.num_tasks = num_tasks
-        
+
         # Default weights if not provided
         if pos_weights is None:
-            pos_weights = {'chole': 1.0, 'ossic': 1.0, 'facial': 1.0}
-        
+            pos_weights = {'chole': 1.0, 'ossic': 1.0, 'facial': 1.0, 'lscc': 1.0}
+
         if task_weights is None:
             if num_tasks == 2:
                 task_weights = {'chole': 0.6, 'ossic': 0.4}
-            else:
+            elif num_tasks == 3:
                 task_weights = {'chole': 0.5, 'ossic': 0.3, 'facial': 0.2}
+            else:
+                task_weights = {'chole': 0.45, 'ossic': 0.25, 'facial': 0.2, 'lscc': 0.1}
         
         self.task_weights = task_weights
         
@@ -68,6 +73,14 @@ class MaskedMultiTaskLoss(nn.Module):
             )
         else:
             self.loss_facial = None
+
+        if num_tasks >= 4:
+            self.loss_lscc = nn.BCEWithLogitsLoss(
+                pos_weight=torch.tensor([pos_weights.get('lscc', 1.0)]),
+                reduction='none'
+            )
+        else:
+            self.loss_lscc = None
     
     def forward(
         self,
@@ -95,6 +108,8 @@ class MaskedMultiTaskLoss(nn.Module):
         self.loss_ossic.pos_weight = self.loss_ossic.pos_weight.to(device)
         if self.loss_facial is not None:
             self.loss_facial.pos_weight = self.loss_facial.pos_weight.to(device)
+        if self.loss_lscc is not None:
+            self.loss_lscc.pos_weight = self.loss_lscc.pos_weight.to(device)
         
         # Compute per-sample losses
         loss_c = self.loss_chole(preds[:, 0], targets[:, 0].float())
@@ -128,9 +143,18 @@ class MaskedMultiTaskLoss(nn.Module):
             loss_f = loss_f * masks[:, 2]
             n_valid_f = masks[:, 2].sum().clamp(min=1)
             loss_f_mean = loss_f.sum() / n_valid_f
-            
+
             total_loss = total_loss + self.task_weights['facial'] * loss_f_mean
             loss_dict['loss_facial'] = loss_f_mean.item()
+
+        if self.num_tasks >= 4 and self.loss_lscc is not None:
+            loss_l = self.loss_lscc(preds[:, 3], targets[:, 3].float())
+            loss_l = loss_l * masks[:, 3]
+            n_valid_l = masks[:, 3].sum().clamp(min=1)
+            loss_l_mean = loss_l.sum() / n_valid_l
+
+            total_loss = total_loss + self.task_weights['lscc'] * loss_l_mean
+            loss_dict['loss_lscc'] = loss_l_mean.item()
         
         loss_dict['loss_total'] = total_loss.item()
         
@@ -153,7 +177,8 @@ def compute_class_weights(labels_df, label_cols: list) -> Dict[str, float]:
     col_mapping = {
         'cholesteatoma': 'chole',
         'ossicular_discontinuity': 'ossic',
-        'facial_dehiscence': 'facial'
+        'facial_dehiscence': 'facial',
+        'lscc_dehiscence': 'lscc'
     }
     
     for col in label_cols:

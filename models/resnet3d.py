@@ -259,7 +259,8 @@ class TemporalBoneClassifier(nn.Module):
     Uses ResNet3D backbone with multi-task heads for:
     - Cholesteatoma detection
     - Ossicular chain discontinuity
-    - Facial nerve dehiscence (optional, for production only)
+    - Facial nerve dehiscence
+    - LSCC dehiscence (optional 4th task)
     """
     
     def __init__(
@@ -270,11 +271,14 @@ class TemporalBoneClassifier(nn.Module):
     ):
         """
         Args:
-            num_tasks: Number of classification tasks (2 for validation, 3 for production)
+            num_tasks: Number of classification tasks (2, 3, or 4)
             use_cbam: Whether to use CBAM attention in backbone
             pretrained_path: Path to MedicalNet pretrained weights
         """
         super().__init__()
+
+        if num_tasks < 2 or num_tasks > 4:
+            raise ValueError(f"num_tasks must be 2, 3, or 4. Got {num_tasks}")
         
         self.num_tasks = num_tasks
         
@@ -321,6 +325,17 @@ class TemporalBoneClassifier(nn.Module):
             )
         else:
             self.head_facial_nerve = None
+
+        if num_tasks >= 4:
+            self.head_lscc = nn.Sequential(
+                nn.Dropout(0.5),
+                nn.Linear(feature_dim, 256),
+                nn.ReLU(inplace=True),
+                nn.Dropout(0.4),
+                nn.Linear(256, 1)
+            )
+        else:
+            self.head_lscc = None
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -339,11 +354,14 @@ class TemporalBoneClassifier(nn.Module):
         pred_chole = self.head_cholesteatoma(features)
         pred_ossic = self.head_ossicular(features)
         
+        preds = [pred_chole, pred_ossic]
+
         if self.head_facial_nerve is not None:
-            pred_facial = self.head_facial_nerve(features)
-            return torch.cat([pred_chole, pred_ossic, pred_facial], dim=1)
-        else:
-            return torch.cat([pred_chole, pred_ossic], dim=1)
+            preds.append(self.head_facial_nerve(features))
+        if self.head_lscc is not None:
+            preds.append(self.head_lscc(features))
+
+        return torch.cat(preds, dim=1)
 
 
 def resnet18_3d(pretrained_path: Optional[str] = None, auto_download: bool = True, **kwargs) -> ResNet3D:
